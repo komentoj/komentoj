@@ -17,11 +17,12 @@ use crate::{
     error::{AppError, AppResult},
     state::AppState,
 };
-use axum::{
-    extract::State,
-    http::{header::AUTHORIZATION, HeaderMap},
-    Json,
+use axum::{extract::State, Json};
+use axum_extra::{
+    headers::{authorization::Bearer, Authorization},
+    TypedHeader,
 };
+use subtle::ConstantTimeEq;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -63,10 +64,12 @@ pub struct RejectedPost {
 
 pub async fn sync_posts(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     Json(body): Json<SyncRequest>,
 ) -> AppResult<Json<SyncResponse>> {
-    verify_admin_token(&state, &headers)?;
+    if !bool::from(bearer.token().as_bytes().ct_eq(state.config.admin.token.as_bytes())) {
+        return Err(AppError::Unauthorized("invalid admin token".into()));
+    }
 
     let mut upserted = 0usize;
     let mut published = 0usize;
@@ -224,27 +227,3 @@ pub async fn sync_posts(
     Ok(Json(SyncResponse { upserted, published, updated, deactivated, rejected }))
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-
-pub fn verify_admin_token(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("missing Authorization header".into()))?;
-
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::Unauthorized("Authorization must use Bearer scheme".into()))?;
-
-    if !constant_time_eq(token.as_bytes(), state.config.admin.token.as_bytes()) {
-        return Err(AppError::Unauthorized("invalid admin token".into()));
-    }
-    Ok(())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
