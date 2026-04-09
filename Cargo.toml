@@ -1,0 +1,72 @@
+[package]
+name = "komentoj"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "util"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+
+# Redis
+deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (for fetching remote actors/objects)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Cryptography (HTTP Signatures)
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# URL handling & validation
+url = "2"
+
+# HTML sanitization (for incoming AP content)
+ammonia = "4"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUIDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Config
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# HTTP types
+http = "1"
+bytes = "1"
+
+# HTTP date formatting/parsing (for Signature Date header)
+httpdate = "1"
+
+# Concurrent futures (fan-out delivery)
+futures = "0.3"
+
+# Markdown → HTML (for post content in AP Notes)
+markdown = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,40 @@
+# komentoj configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[instance]
+# The domain this service is deployed at (must have valid HTTPS in production)
+domain = "comments.example.com"
+
+# The username part of the fediverse handle: @comments@comments.example.com
+username = "comments"
+
+# Human-readable name shown on the actor profile
+display_name = "Blog Comments"
+
+# Short bio shown on the actor profile
+summary = "Fediverse comment bot for example.com"
+
+# Only process comments that mention URLs on these domains
+# (prevents random people from using your instance to host arbitrary comments)
+blog_domains = ["example.com", "www.example.com"]
+
+[database]
+url = "postgresql://postgres:password@localhost:5432/komentoj"
+max_connections = 10
+
+[redis]
+url = "redis://localhost:6379"
+# TTL in seconds for cached actor documents
+actor_cache_ttl = 3600
+
+[cors]
+# Domains allowed to query the comments API
+allowed_origins = ["https://example.com", "https://www.example.com"]
+
+[admin]
+# Bearer token required for write operations (POST /api/v1/posts/sync).
+# Generate with: openssl rand -hex 32
+token = "change-me-use-openssl-rand-hex-32"
