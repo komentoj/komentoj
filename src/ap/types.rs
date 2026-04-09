@@ -9,9 +9,6 @@ use serde_json::Value;
 
 // ── @context helpers ─────────────────────────────────────────────────────────
 
-pub const CTX_AS: &str = "https://www.w3.org/ns/activitystreams";
-pub const CTX_SEC: &str = "https://w3id.org/security/v1";
-
 /// The standard @context array used on our actor document.
 pub fn actor_context() -> Value {
     serde_json::json!([
@@ -28,19 +25,12 @@ pub fn actor_context() -> Value {
     ])
 }
 
-/// Minimal context for activities we produce (Accept, etc.)
-pub fn activity_context() -> Value {
-    serde_json::json!([
-        "https://www.w3.org/ns/activitystreams",
-        "https://w3id.org/security/v1"
-    ])
-}
-
 // ── Incoming activity envelope ───────────────────────────────────────────────
 
 /// A raw incoming Activity from the inbox. We keep `object` as raw JSON
 /// because it can be a URL string, an embedded object, or an array.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct IncomingActivity {
     #[serde(rename = "@context")]
     pub context: Option<Value>,
@@ -88,19 +78,17 @@ pub enum StringOrArray {
     Array(Vec<String>),
 }
 
+#[allow(dead_code)]
 impl StringOrArray {
-    pub fn contains(&self, s: &str) -> bool {
-        match self {
-            StringOrArray::Single(v) => v == s,
-            StringOrArray::Array(v) => v.iter().any(|x| x == s),
-        }
-    }
-
     pub fn to_vec(&self) -> Vec<&str> {
         match self {
             StringOrArray::Single(s) => vec![s.as_str()],
             StringOrArray::Array(v) => v.iter().map(String::as_str).collect(),
         }
+    }
+
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_vec().iter().any(|s| *s == needle)
     }
 }
 
@@ -118,6 +106,7 @@ pub fn is_public(to: &Option<StringOrArray>, cc: &Option<StringOrArray>) -> bool
 
 // ── AP Note (the comment payload) ────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Note {
     pub id: String,
@@ -138,10 +127,10 @@ pub struct Note {
     /// Original source (e.g. Markdown before rendering)
     pub source: Option<NoteSource>,
 
-    pub url: Option<StringOrObject>,
-
     #[serde(rename = "inReplyTo")]
     pub in_reply_to: Option<StringOrObject>,
+
+    pub url: Option<StringOrObject>,
 
     pub to: Option<StringOrArray>,
     pub cc: Option<StringOrArray>,
@@ -149,13 +138,13 @@ pub struct Note {
     pub published: Option<String>,
 
     pub sensitive: Option<bool>,
-    pub summary: Option<String>,
-
-    /// Inline attachments (we note them but don't store)
-    pub attachment: Option<Vec<Value>>,
+    pub summary: Option<String>,  // content warning / subject line
 
     /// Hashtag / Mention tags
     pub tag: Option<Vec<Value>>,
+
+    /// Attached media
+    pub attachment: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -165,6 +154,7 @@ pub struct NoteSource {
     pub media_type: String,
 }
 
+#[allow(dead_code)]
 impl Note {
     /// Returns the best available HTML content.
     pub fn best_content(&self) -> Option<&str> {
@@ -193,7 +183,7 @@ impl Note {
         is_public(&self.to, &self.cc)
     }
 
-    /// Extract the URL to display (prefer `url`, fall back to `id`).
+    /// Best URL for displaying this note (prefers `url` over `id`).
     pub fn display_url(&self) -> &str {
         self.url
             .as_ref()
@@ -204,6 +194,7 @@ impl Note {
 
 // ── AP Actor ─────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RemoteActor {
     pub id: String,
@@ -225,7 +216,7 @@ pub struct RemoteActor {
     pub public_key: Option<PublicKeyObject>,
 
     pub icon: Option<Value>,   // avatar
-    pub image: Option<Value>,  // banner
+    pub image: Option<Value>,  // header/banner image
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -242,6 +233,7 @@ pub struct PublicKeyObject {
     pub public_key_pem: String,
 }
 
+#[allow(dead_code)]
 impl RemoteActor {
     pub fn preferred_inbox(&self) -> Option<&str> {
         self.endpoints

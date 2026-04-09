@@ -20,7 +20,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{DateTime, Utc};
 use rsa::{
     pkcs1::DecodeRsaPublicKey,
-    pkcs8::{DecodePrivateKey, DecodePublicKey},
+    pkcs8::DecodePublicKey,
     Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -35,7 +35,6 @@ const DATE_FRESHNESS_SECS: i64 = 300; // ±5 minutes
 /// Headers to add to a signed outbound request.
 pub struct SignedRequestHeaders {
     pub date: String,
-    pub digest: Option<String>,   // None for GET
     pub signature: String,
 }
 
@@ -85,11 +84,7 @@ pub fn sign_request(
         r#"keyId="{key_id}",algorithm="rsa-sha256",headers="{headers_list}",signature="{sig_b64}""#
     );
 
-    Ok(SignedRequestHeaders {
-        date,
-        digest,
-        signature,
-    })
+    Ok(SignedRequestHeaders { date, signature })
 }
 
 // ── Inbound verification ─────────────────────────────────────────────────────
@@ -98,7 +93,6 @@ pub fn sign_request(
 #[derive(Debug)]
 pub struct ParsedSignature {
     pub key_id: String,
-    pub algorithm: Option<String>,
     pub signed_headers: Vec<String>,
     pub signature_bytes: Vec<u8>,
 }
@@ -186,7 +180,7 @@ pub fn extract_key_id(signature_header: &str) -> AppResult<String> {
 
 fn parse_signature_header(value: &str) -> AppResult<ParsedSignature> {
     let mut key_id = None::<String>;
-    let mut algorithm = None::<String>;
+    let mut _algorithm = None::<String>;
     let mut headers = None::<String>;
     let mut signature = None::<String>;
 
@@ -200,7 +194,7 @@ fn parse_signature_header(value: &str) -> AppResult<ParsedSignature> {
             let v = v.trim().trim_matches('"').to_string();
             match k.as_str() {
                 "keyid" => key_id = Some(v),
-                "algorithm" => algorithm = Some(v),
+                "algorithm" => _algorithm = Some(v),
                 "headers" => headers = Some(v),
                 "signature" => signature = Some(v),
                 _ => {}
@@ -227,7 +221,6 @@ fn parse_signature_header(value: &str) -> AppResult<ParsedSignature> {
 
     Ok(ParsedSignature {
         key_id,
-        algorithm,
         signed_headers,
         signature_bytes,
     })

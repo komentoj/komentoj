@@ -24,7 +24,8 @@ pub fn sanitize_note_html(html: &str) -> String {
 }
 
 /// Sanitize a plain-text field (name, summary) — strip all HTML.
-pub fn strip_html(html: &str) -> String {
+#[allow(dead_code)]
+fn strip_html(html: &str) -> String {
     ammonia::Builder::empty().clean(html).to_string()
 }
 

@@ -77,6 +77,7 @@ impl Config {
     }
 
     /// Check whether a URL belongs to one of the configured blog domains
+    #[allow(dead_code)]
     pub fn is_blog_url(&self, url: &str) -> bool {
         let Ok(parsed) = url::Url::parse(url) else {
             return false;

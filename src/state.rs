@@ -13,6 +13,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct InstanceKey {
     pub private_key: Arc<RsaPrivateKey>,
+    #[allow(dead_code)]
     pub public_key: Arc<RsaPublicKey>,
     pub public_key_pem: String,
 }

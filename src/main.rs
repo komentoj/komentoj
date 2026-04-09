@@ -22,7 +22,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use tower_http::{
-    cors::{AllowHeaders, AllowMethods, CorsLayer},
+    cors::{AllowHeaders, CorsLayer},
     trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
