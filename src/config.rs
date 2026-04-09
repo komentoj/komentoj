@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
 use serde::Deserialize;
-use std::fs;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -50,10 +53,19 @@ pub struct AdminConfig {
 }
 
 impl Config {
+    /// Load configuration from a TOML file, then layer environment variable
+    /// overrides on top. Env vars use the prefix `KOMENTOJ_` and double
+    /// underscores as path separators, e.g.:
+    ///
+    ///   KOMENTOJ_SERVER__PORT=9000
+    ///   KOMENTOJ_DATABASE__URL=postgres://...
+    ///   KOMENTOJ_ADMIN__TOKEN=secret
     pub fn load(path: &str) -> Result<Self> {
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("reading config file: {path}"))?;
-        toml::from_str(&contents).context("parsing config TOML")
+        Figment::new()
+            .merge(Toml::file(path))
+            .merge(Env::prefixed("KOMENTOJ_").split("__"))
+            .extract()
+            .context("loading configuration")
     }
 
     /// Canonical actor URL: https://{domain}/actor
