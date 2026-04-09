@@ -4,6 +4,7 @@ export default defineConfig({
   lang: 'en-US',
   title: 'komentoj',
   description: 'Lightweight ActivityPub comment server for static blogs',
+  base: '/komentoj/',
 
   lastUpdated: true,
   cleanUrls: true,
