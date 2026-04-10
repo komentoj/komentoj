@@ -3,14 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://komentoj:komentoj@localhost:5432/komentoj_test
 
 jobs:
+  # ── Unit + integration tests ─────────────────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -58,5 +61,210 @@ jobs:
         run: cargo test --locked
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
-          # Silence sqlx compile-time checks (tests use runtime queries)
           SQLX_OFFLINE: false
+
+  # ── GoToSocial federation tests ──────────────────────────────────────────────
+  e2e-gotosocial:
+    name: E2E — GoToSocial
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build komentoj image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: komentoj:e2e
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install mkcert
+        run: |
+          sudo apt-get install -y libnss3-tools
+          curl -fsSL "https://dl.filippo.io/mkcert/latest?for=linux/amd64" \
+            -o /tmp/mkcert
+          sudo install -m 0755 /tmp/mkcert /usr/local/bin/mkcert
+
+      - name: Generate TLS certificates
+        run: |
+          mkdir -p e2e/gotosocial/certs
+          mkcert \
+            -cert-file e2e/gotosocial/certs/local.crt \
+            -key-file  e2e/gotosocial/certs/local.key \
+            komentoj.local gotosocial.local
+          cp "$(mkcert -CAROOT)/rootCA.pem" e2e/gotosocial/certs/rootCA.pem
+
+      - name: Start E2E stack
+        run: |
+          KOMENTOJ_IMAGE=komentoj:e2e \
+            docker compose -f e2e/gotosocial/docker-compose.yml up -d --no-build
+
+      - name: Wait for services healthy
+        run: |
+          RESOLVE="--resolve komentoj.local:443:127.0.0.1 --resolve gotosocial.local:443:127.0.0.1 --resolve gotosocial.local:8888:127.0.0.1"
+          CACERT="--cacert e2e/gotosocial/certs/rootCA.pem"
+
+          echo "Waiting for komentoj (via Caddy HTTPS)..."
+          for i in $(seq 1 24); do
+            if curl -sf $RESOLVE $CACERT 'https://komentoj.local/.well-known/webfinger?resource=acct:komentoj@komentoj.local' >/dev/null 2>&1; then
+              echo "komentoj ready"; break
+            fi
+            sleep 5
+          done
+
+          echo "Waiting for GoToSocial (via Caddy HTTPS)..."
+          for i in $(seq 1 60); do
+            if curl -sf $RESOLVE $CACERT https://gotosocial.local:8888/api/v1/instance >/dev/null 2>&1; then
+              echo "gotosocial ready"; break
+            fi
+            sleep 5
+          done
+
+      - name: Run E2E tests
+        run: ./e2e/gotosocial/test.sh
+
+      - name: Dump service logs
+        if: failure()
+        run: |
+          echo "=== caddy ===" && docker compose -f e2e/gotosocial/docker-compose.yml logs caddy
+          echo "=== komentoj ===" && docker compose -f e2e/gotosocial/docker-compose.yml logs komentoj
+          echo "=== gotosocial ===" && docker compose -f e2e/gotosocial/docker-compose.yml logs gotosocial
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/gotosocial/docker-compose.yml down -v
+
+  # ── Mastodon federation tests ────────────────────────────────────────────────
+  e2e-mastodon:
+    name: E2E — Mastodon
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build komentoj image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: komentoj:e2e
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install mkcert
+        run: |
+          sudo apt-get install -y libnss3-tools
+          curl -fsSL "https://dl.filippo.io/mkcert/latest?for=linux/amd64" \
+            -o /tmp/mkcert
+          sudo install -m 0755 /tmp/mkcert /usr/local/bin/mkcert
+
+      - name: Generate TLS certificates
+        run: |
+          mkdir -p e2e/mastodon/certs
+          mkcert \
+            -cert-file e2e/mastodon/certs/local.crt \
+            -key-file  e2e/mastodon/certs/local.key \
+            komentoj.local mastodon.local
+          cp "$(mkcert -CAROOT)/rootCA.pem" e2e/mastodon/certs/rootCA.pem
+
+      - name: Generate VAPID keys
+        run: |
+          VAPID_OUTPUT=$(docker run --rm ghcr.io/mastodon/mastodon:latest \
+            bundle exec rake mastodon:webpush:generate_vapid_key 2>/dev/null)
+          echo "VAPID_PRIVATE_KEY=$(echo "$VAPID_OUTPUT" | grep VAPID_PRIVATE_KEY | cut -d= -f2-)" >> "$GITHUB_ENV"
+          echo "VAPID_PUBLIC_KEY=$(echo "$VAPID_OUTPUT"  | grep VAPID_PUBLIC_KEY  | cut -d= -f2-)" >> "$GITHUB_ENV"
+
+      - name: Start E2E stack
+        run: |
+          KOMENTOJ_IMAGE=komentoj:e2e \
+            docker compose -f e2e/mastodon/docker-compose.yml up -d --no-build
+
+      - name: Wait for services healthy
+        run: |
+          RESOLVE="--resolve komentoj.local:443:127.0.0.1 --resolve mastodon.local:443:127.0.0.1"
+          CACERT="--cacert e2e/mastodon/certs/rootCA.pem"
+
+          echo "Waiting for komentoj (via Caddy HTTPS)..."
+          for i in $(seq 1 24); do
+            if curl -sf $RESOLVE $CACERT 'https://komentoj.local/.well-known/webfinger?resource=acct:komentoj@komentoj.local' >/dev/null 2>&1; then
+              echo "komentoj ready"; break
+            fi
+            sleep 5
+          done
+
+          echo "Waiting for Mastodon (via Caddy HTTPS)..."
+          for i in $(seq 1 72); do
+            if curl -sf $RESOLVE $CACERT https://mastodon.local/health >/dev/null 2>&1; then
+              echo "mastodon ready"; break
+            fi
+            sleep 5
+          done
+
+      - name: Run E2E tests
+        run: ./e2e/mastodon/test.sh
+
+      - name: Dump service logs
+        if: failure()
+        run: |
+          echo "=== caddy ===" && docker compose -f e2e/mastodon/docker-compose.yml logs caddy
+          echo "=== komentoj ===" && docker compose -f e2e/mastodon/docker-compose.yml logs komentoj
+          echo "=== mastodon-web ===" && docker compose -f e2e/mastodon/docker-compose.yml logs mastodon-web
+          echo "=== mastodon-sidekiq ===" && docker compose -f e2e/mastodon/docker-compose.yml logs mastodon-sidekiq
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/mastodon/docker-compose.yml down -v
+
+  # ── Publish Docker image (only on main push or tag, after all tests pass) ────
+  publish:
+    name: Publish Docker image
+    needs: [test, e2e-gotosocial, e2e-mastodon]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
