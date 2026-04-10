@@ -28,23 +28,20 @@ pub async fn publish_post_note(
     url: &str,
     content: &str,
 ) -> AppResult<String> {
-    let note_id = format!(
-        "https://{}/notes/{}",
-        state.config.instance.domain,
-        Uuid::new_v4()
-    );
+    let base = state.config.base_url();
+    let note_id = format!("{base}/notes/{}", Uuid::new_v4());
     let now = now_str();
     let note = build_note(&note_id, title, url, content, &now, &now, state);
 
     let activity = serde_json::json!({
         "@context": "https://www.w3.org/ns/activitystreams",
-        "id":    format!("https://{}/activities/create/{}", state.config.instance.domain, Uuid::new_v4()),
+        "id":    format!("{base}/activities/create/{}", Uuid::new_v4()),
         "type":  "Create",
         "actor": state.config.actor_url(),
         "object": note,
         "published": now,
         "to": [PUBLIC_URI],
-        "cc": [format!("https://{}/followers", state.config.instance.domain)],
+        "cc": [format!("{base}/followers")],
     });
 
     // Persist before delivery so inReplyTo matching works immediately
@@ -69,19 +66,20 @@ pub async fn update_post_note(
     content: &str,
     published_at: &str,
 ) -> AppResult<()> {
+    let base = state.config.base_url();
     let now = now_str();
     let mut note = build_note(note_id, title, url, content, published_at, &now, state);
     note["updated"] = serde_json::Value::String(now.clone());
 
     let activity = serde_json::json!({
         "@context": "https://www.w3.org/ns/activitystreams",
-        "id":    format!("https://{}/activities/update/{}", state.config.instance.domain, Uuid::new_v4()),
+        "id":    format!("{base}/activities/update/{}", Uuid::new_v4()),
         "type":  "Update",
         "actor": state.config.actor_url(),
         "object": note,
         "published": now,
         "to": [PUBLIC_URI],
-        "cc": [format!("https://{}/followers", state.config.instance.domain)],
+        "cc": [format!("{base}/followers")],
     });
 
     fan_out(state, activity).await;
@@ -99,7 +97,7 @@ fn build_note(
     _updated: &str,
     state: &AppState,
 ) -> serde_json::Value {
-    let followers_url = format!("https://{}/followers", state.config.instance.domain);
+    let followers_url = format!("{}/followers", state.config.base_url());
     let content_html = render_note_html(title, url, content_md);
 
     serde_json::json!({

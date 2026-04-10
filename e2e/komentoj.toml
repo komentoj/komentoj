@@ -1,0 +1,25 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[instance]
+domain   = "komentoj.local:8080"
+protocol = "http"
+username = "komentoj"
+display_name = "Komentoj E2E"
+summary  = "Local E2E test instance"
+blog_domains = ["gotosocial.local:8888"]
+
+[database]
+url             = "postgres://komentoj:komentoj@postgres:5432/komentoj"
+max_connections = 5
+
+[redis]
+url            = "redis://redis:6379"
+actor_cache_ttl = 3600
+
+[cors]
+allowed_origins = ["http://gotosocial.local:8888"]
+
+[admin]
+token = "e2e-test-admin-token"

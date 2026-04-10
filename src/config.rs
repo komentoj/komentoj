@@ -21,6 +21,10 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+fn default_https() -> String {
+    "https".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct InstanceConfig {
     pub domain: String,
@@ -28,6 +32,9 @@ pub struct InstanceConfig {
     pub display_name: String,
     pub summary: String,
     pub blog_domains: Vec<String>,
+    /// URL scheme: "https" (default) or "http" (local dev/testing only)
+    #[serde(default = "default_https")]
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,19 +75,24 @@ impl Config {
             .context("loading configuration")
     }
 
-    /// Canonical actor URL: https://{domain}/actor
-    pub fn actor_url(&self) -> String {
-        format!("https://{}/actor", self.instance.domain)
+    /// Base URL: {protocol}://{domain}
+    pub fn base_url(&self) -> String {
+        format!("{}://{}", self.instance.protocol, self.instance.domain)
     }
 
-    /// Canonical key ID: https://{domain}/actor#main-key
+    /// Canonical actor URL: {protocol}://{domain}/actor
+    pub fn actor_url(&self) -> String {
+        format!("{}/actor", self.base_url())
+    }
+
+    /// Canonical key ID: {protocol}://{domain}/actor#main-key
     pub fn key_id(&self) -> String {
-        format!("https://{}/actor#main-key", self.instance.domain)
+        format!("{}/actor#main-key", self.base_url())
     }
 
     /// Inbox URL
     pub fn inbox_url(&self) -> String {
-        format!("https://{}/inbox", self.instance.domain)
+        format!("{}/inbox", self.base_url())
     }
 
     /// acct: URI for WebFinger

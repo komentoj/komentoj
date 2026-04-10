@@ -12,7 +12,7 @@ use crate::{
 };
 use reqwest::{header::ACCEPT, Client};
 use rsa::RsaPrivateKey;
-use std::{net::IpAddr, str::FromStr, time::Duration};
+use std::{net::IpAddr, time::Duration};
 use url::Url;
 
 const ACCEPT_AP: &str =

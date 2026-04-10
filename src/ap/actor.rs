@@ -84,15 +84,12 @@ pub async fn actor_handler(
         // Redirect browsers to the blog or a simple info page
         return Ok((
             StatusCode::SEE_OTHER,
-            [(
-                header::LOCATION,
-                format!("https://{}", state.config.instance.domain),
-            )],
+            [(header::LOCATION, state.config.base_url())],
         )
             .into_response());
     }
 
-    let domain = &state.config.instance.domain;
+    let base = state.config.base_url();
     let actor_url = state.config.actor_url();
     let key_id = state.config.key_id();
 
@@ -105,9 +102,9 @@ pub async fn actor_handler(
         summary: state.config.instance.summary.clone(),
         url: actor_url.clone(),
         inbox: state.config.inbox_url(),
-        outbox: format!("https://{domain}/outbox"),
-        followers: format!("https://{domain}/followers"),
-        following: format!("https://{domain}/following"),
+        outbox: format!("{base}/outbox"),
+        followers: format!("{base}/followers"),
+        following: format!("{base}/following"),
         endpoints: ActorEndpointsOut {
             shared_inbox: state.config.inbox_url(),
         },
@@ -134,22 +131,22 @@ pub async fn actor_handler(
 
 /// Stub endpoints required by AP spec (empty ordered collections)
 pub async fn outbox_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let domain = &state.config.instance.domain;
+    let base = state.config.base_url();
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/activity+json")],
         Json(serde_json::json!({
             "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("https://{domain}/outbox"),
+            "id": format!("{base}/outbox"),
             "type": "OrderedCollection",
             "totalItems": 0,
-            "first": format!("https://{domain}/outbox?page=1"),
+            "first": format!("{base}/outbox?page=1"),
         })),
     )
 }
 
 pub async fn followers_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let domain = &state.config.instance.domain;
+    let base = state.config.base_url();
     let count: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM followers WHERE accepted = TRUE",
     )
@@ -162,7 +159,7 @@ pub async fn followers_handler(State(state): State<AppState>) -> impl IntoRespon
         [(header::CONTENT_TYPE, "application/activity+json")],
         Json(serde_json::json!({
             "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("https://{domain}/followers"),
+            "id": format!("{base}/followers"),
             "type": "OrderedCollection",
             "totalItems": count,
         })),
@@ -170,13 +167,13 @@ pub async fn followers_handler(State(state): State<AppState>) -> impl IntoRespon
 }
 
 pub async fn following_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let domain = &state.config.instance.domain;
+    let base = state.config.base_url();
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/activity+json")],
         Json(serde_json::json!({
             "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("https://{domain}/following"),
+            "id": format!("{base}/following"),
             "type": "OrderedCollection",
             "totalItems": 0,
         })),
@@ -195,10 +192,7 @@ pub async fn note_handler(
     State(state): State<AppState>,
     Path(note_uuid): Path<String>,
 ) -> AppResult<Response> {
-    let note_id = format!(
-        "https://{}/notes/{note_uuid}",
-        state.config.instance.domain
-    );
+    let note_id = format!("{}/notes/{note_uuid}", state.config.base_url());
 
     let row = sqlx::query_as::<_, (Option<String>, String, String, DateTime<Utc>, DateTime<Utc>)>(
         "SELECT title, url, content, registered_at, updated_at \
@@ -210,7 +204,7 @@ pub async fn note_handler(
 
     let (title, url, content_md, registered_at, updated_at) = row.ok_or(AppError::NotFound)?;
 
-    let domain = &state.config.instance.domain;
+    let base = state.config.base_url();
     let published_str = registered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let updated_str   = updated_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -226,7 +220,7 @@ pub async fn note_handler(
         "url":          url,
         "published":    published_str,
         "to":  [PUBLIC_URI],
-        "cc":  [format!("https://{domain}/followers")],
+        "cc":  [format!("{base}/followers")],
         "source": {
             "content":   content_md,
             "mediaType": "text/markdown",

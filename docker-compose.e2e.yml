@@ -1,0 +1,115 @@
+version: "3.9"
+
+# E2E federation test environment
+#
+# Runs komentoj + GoToSocial on an isolated Docker bridge network so they
+# can discover each other by hostname without TLS.
+#
+# Usage:
+#   docker compose -f docker-compose.e2e.yml up -d
+#   ./e2e/test.sh
+#   docker compose -f docker-compose.e2e.yml down -v
+
+networks:
+  fedi:
+    driver: bridge
+
+services:
+  # ── Shared Postgres ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: komentoj
+      POSTGRES_PASSWORD: komentoj
+      POSTGRES_DB: komentoj
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U komentoj"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fedi
+
+  # ── GoToSocial Postgres DB ───────────────────────────────────────────────────
+  gts-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gotosocial
+      POSTGRES_PASSWORD: gotosocial
+      POSTGRES_DB: gotosocial
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gotosocial"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fedi
+
+  # ── Redis (for komentoj) ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    networks:
+      - fedi
+
+  # ── komentoj ────────────────────────────────────────────────────────────────
+  komentoj:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./e2e/komentoj.toml:/etc/komentoj/config.toml:ro
+      - komentoj-keys:/var/lib/komentoj
+    environment:
+      DATABASE_URL: postgres://komentoj:komentoj@postgres:5432/komentoj
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      fedi:
+        aliases:
+          - komentoj.local
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/.well-known/webfinger?resource=acct:komentoj@komentoj.local:8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ── GoToSocial ───────────────────────────────────────────────────────────────
+  gotosocial:
+    image: superseriousbusiness/gotosocial:latest
+    environment:
+      GTS_HOST: gotosocial.local
+      GTS_PORT: "8888"
+      GTS_PROTOCOL: http
+      GTS_LETSENCRYPT_ENABLED: "false"
+      GTS_DB_TYPE: postgres
+      GTS_DB_ADDRESS: gts-postgres
+      GTS_DB_PORT: "5432"
+      GTS_DB_USER: gotosocial
+      GTS_DB_PASSWORD: gotosocial
+      GTS_DB_DATABASE: gotosocial
+      GTS_ACCOUNTS_REGISTRATION_OPEN: "true"
+      GTS_ACCOUNTS_APPROVAL_REQUIRED: "false"
+      GTS_ACCOUNTS_REASON_REQUIRED: "false"
+      GTS_LOG_LEVEL: warn
+    depends_on:
+      gts-postgres:
+        condition: service_healthy
+    networks:
+      fedi:
+        aliases:
+          - gotosocial.local
+    ports:
+      - "8888:8888"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8888/api/v1/instance || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+volumes:
+  komentoj-keys:
