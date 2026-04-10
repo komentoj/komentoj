@@ -1,2 +1,4 @@
 target/
-e2e/certs/
+e2e/gotosocial/certs/
+e2e/mastodon/certs/
+e2e/mastodon/.env

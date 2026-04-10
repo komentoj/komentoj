@@ -2,11 +2,11 @@
 # E2E federation test: komentoj ↔ GoToSocial (HTTPS)
 #
 # Prerequisites:
-#   ./e2e/setup.sh           # generate mkcert certs + /etc/hosts entries
-#   docker compose -f docker-compose.e2e.yml up -d
+#   ./e2e/gotosocial/setup.sh    # generate mkcert certs + /etc/hosts entries
+#   docker compose -f e2e/gotosocial/docker-compose.yml up -d
 #
 # Run from the repository root:
-#   ./e2e/test.sh
+#   ./e2e/gotosocial/test.sh
 
 set -euo pipefail
 
@@ -23,6 +23,7 @@ _fail_msgs=()
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CACERT="$SCRIPT_DIR/certs/rootCA.pem"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
 # Route *.local domains to localhost without touching /etc/hosts.
 # All curl calls in this script go through this wrapper automatically.
@@ -96,7 +97,7 @@ section "1. GTS account setup"
 
 # Create + confirm account via GTS CLI (direct DB access, no HTTP needed).
 # The CLI exits 0 even if the account already exists.
-GTS_CONTAINER=$(docker compose -f docker-compose.e2e.yml ps -q gotosocial)
+GTS_CONTAINER=$(docker compose -f "$COMPOSE_FILE" ps -q gotosocial)
 docker exec "$GTS_CONTAINER" \
     /gotosocial/gotosocial --config-path "" admin account create \
     --username "$GTS_USER" --email "$GTS_EMAIL" --password "$GTS_PASSWORD" \
@@ -241,11 +242,11 @@ curl -s -X POST "$GTS/api/v1/statuses" \
 
 # Wait for GTS to process the mention and store the remote account
 wait_for "komentoj actor stored in GTS DB" 30 \
-    'docker compose -f docker-compose.e2e.yml exec -T gts-postgres psql -U gotosocial -t \
+    'docker compose -f "$COMPOSE_FILE" exec -T gts-postgres psql -U gotosocial -t \
      -c "SELECT id FROM accounts WHERE username='"'"'komentoj'"'"' AND domain='"'"'komentoj.local'"'"';" \
      | grep -qE "[0-9A-Z]"'
 
-KOMENTOJ_GTS_ID=$(docker compose -f docker-compose.e2e.yml exec -T gts-postgres \
+KOMENTOJ_GTS_ID=$(docker compose -f "$COMPOSE_FILE" exec -T gts-postgres \
     psql -U gotosocial -t \
     -c "SELECT id FROM accounts WHERE username='komentoj' AND domain='komentoj.local';" \
     | tr -d ' \n')

@@ -1,0 +1,181 @@
+# E2E federation test environment: komentoj ↔ Mastodon
+#
+# Caddy terminates TLS for both domains; Mastodon and komentoj communicate
+# with each other exclusively over HTTPS (via Caddy) just like in production.
+#
+# One-time local setup:
+#   ./e2e/mastodon/setup.sh
+#
+# Usage (local):
+#   docker compose -f e2e/mastodon/docker-compose.yml up -d
+#   ./e2e/mastodon/test.sh
+#   docker compose -f e2e/mastodon/docker-compose.yml down -v
+#
+# VAPID keys must be provided as environment variables (generate once with setup.sh):
+#   export VAPID_PRIVATE_KEY=...
+#   export VAPID_PUBLIC_KEY=...
+
+networks:
+  fedi:
+    driver: bridge
+
+services:
+  # ── Postgres for komentoj ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: komentoj
+      POSTGRES_PASSWORD: komentoj
+      POSTGRES_DB: komentoj
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U komentoj"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fedi
+
+  # ── Postgres for Mastodon ────────────────────────────────────────────────────
+  mastodon-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mastodon
+      POSTGRES_PASSWORD: mastodon
+      POSTGRES_DB: mastodon
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mastodon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fedi
+
+  # ── Redis (shared by komentoj actor cache and Mastodon) ─────────────────────
+  redis:
+    image: redis:7
+    networks:
+      - fedi
+
+  # ── komentoj ────────────────────────────────────────────────────────────────
+  komentoj:
+    image: ${KOMENTOJ_IMAGE:-komentoj:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    entrypoint: ["/e2e/entrypoint.sh"]
+    volumes:
+      - ./komentoj.toml:/config/config.toml:ro
+      - ./certs:/e2e/certs:ro
+      - ./entrypoint.sh:/e2e/entrypoint.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - fedi
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:8080/.well-known/webfinger?resource=acct:komentoj@komentoj.local' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ── Mastodon DB migrations (runs once before web/sidekiq) ───────────────────
+  mastodon-migrate:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: bundle exec rails db:migrate
+    environment: &mastodon-env
+      RAILS_ENV: production
+      LOCAL_DOMAIN: mastodon.local
+      # Secret keys — insecure static values for local E2E only
+      SECRET_KEY_BASE: "e2e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      OTP_SECRET: "e2e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY}"
+      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY}"
+      # ActiveRecord encryption keys (required by Mastodon 4.3+)
+      # Pre-generated for E2E only — do not reuse in production
+      ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY: "Q3le7lqyrkt5ZUJqpj8UmcTP83IJg6dZ"
+      ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT: "5w1RmGWrNaXIj6fKT9U0nbBd3w55EjeK"
+      ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY: "aUSNfHAN1YbGcmDfkLtKdqf5OcikC3oS"
+      DB_HOST: mastodon-postgres
+      DB_PORT: "5432"
+      DB_NAME: mastodon
+      DB_USER: mastodon
+      DB_PASS: mastodon
+      REDIS_URL: redis://redis:6379
+      # Disable email delivery
+      SMTP_SERVER: ""
+      SMTP_PORT: ""
+      SMTP_DELIVERY_METHOD: test
+      # Trust the mkcert CA for outbound HTTPS federation requests
+      SSL_CERT_FILE: /e2e/certs/rootCA.pem
+      # Allow Mastodon to reach Docker bridge network IPs (SSRF bypass for E2E)
+      ALLOWED_PRIVATE_ADDRESSES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+    volumes:
+      - ./certs:/e2e/certs:ro
+    depends_on:
+      mastodon-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - fedi
+
+  # ── Mastodon web (Puma) ──────────────────────────────────────────────────────
+  mastodon-web:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: bundle exec puma -C config/puma.rb
+    environment: *mastodon-env
+    volumes:
+      - ./certs:/e2e/certs:ro
+      - mastodon-public:/opt/mastodon/public/system
+    depends_on:
+      mastodon-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    networks:
+      - fedi
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  # ── Mastodon sidekiq (background jobs, federation delivery) ─────────────────
+  mastodon-sidekiq:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: bundle exec sidekiq
+    environment: *mastodon-env
+    volumes:
+      - ./certs:/e2e/certs:ro
+      - mastodon-public:/opt/mastodon/public/system
+    depends_on:
+      mastodon-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    networks:
+      - fedi
+
+  # ── Caddy (TLS termination + reverse proxy) ──────────────────────────────────
+  # Both komentoj.local and mastodon.local resolve to Caddy inside the Docker
+  # network, so all inter-service traffic goes through HTTPS just as in prod.
+  caddy:
+    image: caddy:2
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+    ports:
+      - "443:443"
+    networks:
+      fedi:
+        aliases:
+          - komentoj.local
+          - mastodon.local
+    depends_on:
+      - komentoj
+      - mastodon-web
+
+volumes:
+  mastodon-public:

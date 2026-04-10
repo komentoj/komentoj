@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-time local E2E setup
-# Installs mkcert, generates TLS certs, updates /etc/hosts
+# One-time local E2E setup for the GoToSocial test suite.
+# Installs mkcert, generates TLS certs, updates /etc/hosts.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,9 +22,6 @@ if ! command -v mkcert &>/dev/null; then
         exit 1
     fi
 fi
-
-# ── Install local CA ──────────────────────────────────────────────────────────
-mkcert -install
 
 # ── Generate leaf certs ───────────────────────────────────────────────────────
 mkcert \
@@ -48,4 +45,4 @@ fi
 
 echo ""
 echo "Setup complete. Start the stack with:"
-echo "  docker compose -f docker-compose.e2e.yml up -d"
+echo "  docker compose -f e2e/gotosocial/docker-compose.yml up -d"

@@ -1,18 +1,15 @@
-# E2E federation test environment
+# E2E federation test environment: komentoj ↔ GoToSocial
 #
 # Caddy terminates TLS for both domains; GTS and komentoj communicate with
 # each other exclusively over HTTPS (via Caddy) just like in production.
 #
 # One-time local setup:
-#   ./e2e/setup.sh        # installs mkcert, generates certs, updates /etc/hosts
+#   ./e2e/gotosocial/setup.sh
 #
 # Usage (local):
-#   docker compose -f docker-compose.e2e.yml up -d
-#   ./e2e/test.sh
-#   docker compose -f docker-compose.e2e.yml down -v
-#
-# In CI, set KOMENTOJ_IMAGE to a pre-built image tag to skip the build step:
-#   KOMENTOJ_IMAGE=komentoj:e2e docker compose -f docker-compose.e2e.yml up -d --no-build
+#   docker compose -f e2e/gotosocial/docker-compose.yml up -d
+#   ./e2e/gotosocial/test.sh
+#   docker compose -f e2e/gotosocial/docker-compose.yml down -v
 
 networks:
   fedi:
@@ -59,13 +56,13 @@ services:
   komentoj:
     image: ${KOMENTOJ_IMAGE:-komentoj:local}
     build:
-      context: .
+      context: ../..
       dockerfile: Dockerfile
     entrypoint: ["/e2e/entrypoint.sh"]
     volumes:
-      - ./e2e/komentoj.toml:/config/config.toml:ro
-      - ./e2e/certs:/e2e/certs:ro
-      - ./e2e/entrypoint.sh:/e2e/entrypoint.sh:ro
+      - ./komentoj.toml:/config/config.toml:ro
+      - ./certs:/e2e/certs:ro
+      - ./entrypoint.sh:/e2e/entrypoint.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -105,7 +102,7 @@ services:
       # By default GTS blocks all private/reserved IP ranges (SSRF protection).
       GTS_HTTP_CLIENT_ALLOW_IPS: "172.16.0.0/12"
     volumes:
-      - ./e2e/certs:/e2e/certs:ro
+      - ./certs:/e2e/certs:ro
     depends_on:
       gts-postgres:
         condition: service_healthy
@@ -118,8 +115,8 @@ services:
   caddy:
     image: caddy:2
     volumes:
-      - ./e2e/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./e2e/certs:/etc/caddy/certs:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
     ports:
       - "443:443"
       - "8888:8888"

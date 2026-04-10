@@ -1,0 +1,13 @@
+{
+    admin off
+}
+
+https://komentoj.local {
+    tls /etc/caddy/certs/local.crt /etc/caddy/certs/local.key
+    reverse_proxy komentoj:8080
+}
+
+https://mastodon.local {
+    tls /etc/caddy/certs/local.crt /etc/caddy/certs/local.key
+    reverse_proxy mastodon-web:3000
+}
