@@ -1,0 +1,75 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    name: Federation E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Build komentoj image with layer cache ─────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build komentoj image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: komentoj:e2e
+          # Load into the local Docker daemon so docker compose can use it
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Start the full stack ──────────────────────────────────────────────
+      - name: Start E2E stack
+        run: |
+          KOMENTOJ_IMAGE=komentoj:e2e \
+            docker compose -f docker-compose.e2e.yml up -d --no-build
+
+      # ── Wait for both services to pass their healthchecks ─────────────────
+      - name: Wait for services healthy
+        run: |
+          echo "Waiting for komentoj..."
+          for i in $(seq 1 24); do
+            if docker compose -f docker-compose.e2e.yml ps komentoj \
+                | grep -q "healthy"; then
+              echo "komentoj healthy"
+              break
+            fi
+            sleep 5
+          done
+
+          echo "Waiting for GoToSocial..."
+          for i in $(seq 1 36); do
+            if docker compose -f docker-compose.e2e.yml ps gotosocial \
+                | grep -q "healthy"; then
+              echo "gotosocial healthy"
+              break
+            fi
+            sleep 5
+          done
+
+      # ── Run the test suite ────────────────────────────────────────────────
+      - name: Run E2E tests
+        run: ./e2e/test.sh
+
+      # ── Diagnostics on failure ────────────────────────────────────────────
+      - name: Dump service logs
+        if: failure()
+        run: |
+          echo "=== komentoj ===" && docker compose -f docker-compose.e2e.yml logs komentoj
+          echo "=== gotosocial ===" && docker compose -f docker-compose.e2e.yml logs gotosocial
+
+      # ── Always clean up ───────────────────────────────────────────────────
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.e2e.yml down -v
