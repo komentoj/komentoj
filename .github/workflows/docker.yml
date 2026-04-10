@@ -1,8 +1,11 @@
 name: Build and publish Docker image
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI", "E2E"]
+    types: [completed]
     branches: [main]
+  push:
     tags: ["v*"]
   workflow_dispatch:
 
@@ -12,13 +15,39 @@ env:
 
 jobs:
   build-push:
+    # For workflow_run events: only proceed if the triggering workflow succeeded.
+    # For tag pushes / manual dispatch: always proceed.
+    if: |
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
 
     steps:
+      # When triggered by a workflow_run event, verify that BOTH CI and E2E
+      # have succeeded for the same commit SHA before publishing.
+      - name: Check CI and E2E both passed
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          REPO="${{ github.repository }}"
+          for WF in "CI" "E2E"; do
+            COUNT=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&status=success" \
+              --jq "[.workflow_runs[] | select(.name == \"$WF\")] | length")
+            if [[ "$COUNT" == "0" ]]; then
+              echo "$WF has not succeeded for $SHA yet — skipping publish"
+              exit 1
+            fi
+          done
+          echo "Both CI and E2E passed for $SHA — proceeding with publish"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
