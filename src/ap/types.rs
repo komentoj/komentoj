@@ -311,3 +311,233 @@ pub struct WebFingerLink {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── StringOrArray ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn string_or_array_single_to_vec() {
+        let s = StringOrArray::Single("https://example.com".into());
+        assert_eq!(s.to_vec(), vec!["https://example.com"]);
+        assert!(s.contains("https://example.com"));
+        assert!(!s.contains("https://other.com"));
+    }
+
+    #[test]
+    fn string_or_array_array_to_vec() {
+        let s: StringOrArray = serde_json::from_str(
+            r#"["https://www.w3.org/ns/activitystreams#Public","https://example.com/followers"]"#,
+        )
+        .unwrap();
+        assert!(s.contains("https://www.w3.org/ns/activitystreams#Public"));
+        assert!(!s.contains("https://other.com"));
+    }
+
+    // ── is_public ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_public_when_to_contains_public_uri() {
+        let to = Some(StringOrArray::Single(
+            "https://www.w3.org/ns/activitystreams#Public".into(),
+        ));
+        assert!(is_public(&to, &None));
+    }
+
+    #[test]
+    fn is_public_when_cc_contains_public_uri() {
+        let cc = Some(StringOrArray::Array(vec![
+            "https://example.com/followers".into(),
+            "https://www.w3.org/ns/activitystreams#Public".into(),
+        ]));
+        assert!(is_public(&None, &cc));
+    }
+
+    #[test]
+    fn not_public_when_missing() {
+        assert!(!is_public(&None, &None));
+        let to = Some(StringOrArray::Single("https://example.com/users/bob".into()));
+        assert!(!is_public(&to, &None));
+    }
+
+    // ── Note deserialization ──────────────────────────────────────────────────
+
+    const MASTODON_NOTE: &str = r#"{
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": "https://mastodon.social/users/alice/statuses/1234",
+        "type": "Note",
+        "attributedTo": "https://mastodon.social/users/alice",
+        "content": "<p>Hello, world!</p>",
+        "inReplyTo": null,
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        "cc": ["https://mastodon.social/users/alice/followers"],
+        "published": "2024-01-15T12:00:00Z",
+        "sensitive": false,
+        "url": "https://mastodon.social/@alice/1234"
+    }"#;
+
+    #[test]
+    fn deserializes_mastodon_note() {
+        let note: Note = serde_json::from_str(MASTODON_NOTE).unwrap();
+        assert_eq!(note.id, "https://mastodon.social/users/alice/statuses/1234");
+        assert_eq!(note.note_type, "Note");
+        assert_eq!(note.best_content(), Some("<p>Hello, world!</p>"));
+        assert!(note.is_public());
+        assert!(!note.sensitive.unwrap_or(false));
+        assert_eq!(
+            note.display_url(),
+            "https://mastodon.social/@alice/1234"
+        );
+    }
+
+    const GOTOSOCIAL_NOTE: &str = r#"{
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": "https://gts.example/users/bob/statuses/abcdef",
+        "type": "Note",
+        "attributedTo": "https://gts.example/users/bob",
+        "contentMap": {
+            "en": "<p>GoToSocial post</p>"
+        },
+        "source": {
+            "content": "GoToSocial post",
+            "mediaType": "text/markdown"
+        },
+        "inReplyTo": "https://mastodon.social/users/alice/statuses/1234",
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        "cc": [],
+        "published": "2024-01-15T13:00:00Z"
+    }"#;
+
+    #[test]
+    fn deserializes_gotosocial_note_with_content_map() {
+        let note: Note = serde_json::from_str(GOTOSOCIAL_NOTE).unwrap();
+        // content is absent; best_content() should fall through to contentMap
+        assert_eq!(note.best_content(), Some("<p>GoToSocial post</p>"));
+        assert_eq!(note.markdown_source(), Some("GoToSocial post"));
+        assert!(note.is_public());
+        let reply_id = note.in_reply_to.as_ref().and_then(|r| r.id());
+        assert_eq!(
+            reply_id,
+            Some("https://mastodon.social/users/alice/statuses/1234")
+        );
+    }
+
+    // ── RemoteActor deserialization ───────────────────────────────────────────
+
+    const MASTODON_ACTOR: &str = r#"{
+        "@context": [
+            "https://www.w3.org/ns/activitystreams",
+            "https://w3id.org/security/v1"
+        ],
+        "id": "https://mastodon.social/users/alice",
+        "type": "Person",
+        "preferredUsername": "alice",
+        "name": "Alice",
+        "inbox": "https://mastodon.social/users/alice/inbox",
+        "endpoints": {
+            "sharedInbox": "https://mastodon.social/inbox"
+        },
+        "publicKey": {
+            "id": "https://mastodon.social/users/alice#main-key",
+            "owner": "https://mastodon.social/users/alice",
+            "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIB...\n-----END PUBLIC KEY-----\n"
+        },
+        "icon": {
+            "type": "Image",
+            "url": "https://mastodon.social/avatars/alice.jpg"
+        },
+        "url": "https://mastodon.social/@alice"
+    }"#;
+
+    #[test]
+    fn deserializes_mastodon_actor() {
+        let actor: RemoteActor = serde_json::from_str(MASTODON_ACTOR).unwrap();
+        assert_eq!(actor.id, "https://mastodon.social/users/alice");
+        assert_eq!(actor.actor_type, "Person");
+        assert_eq!(actor.preferred_username.as_deref(), Some("alice"));
+        assert_eq!(actor.inbox.as_deref(), Some("https://mastodon.social/users/alice/inbox"));
+        assert_eq!(
+            actor.preferred_inbox(),
+            Some("https://mastodon.social/inbox")
+        );
+        assert_eq!(
+            actor.avatar_url(),
+            Some("https://mastodon.social/avatars/alice.jpg")
+        );
+        let pk = actor.public_key.unwrap();
+        assert_eq!(pk.id, "https://mastodon.social/users/alice#main-key");
+    }
+
+    // ── IncomingActivity deserialization ──────────────────────────────────────
+
+    #[test]
+    fn deserializes_follow_activity() {
+        let json = r#"{
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://remote.example/follows/1",
+            "type": "Follow",
+            "actor": "https://remote.example/users/alice",
+            "object": "https://test.example/actor"
+        }"#;
+
+        let activity: IncomingActivity = serde_json::from_str(json).unwrap();
+        assert_eq!(activity.activity_type, "Follow");
+        assert_eq!(activity.actor.id(), Some("https://remote.example/users/alice"));
+        assert_eq!(activity.id.as_deref(), Some("https://remote.example/follows/1"));
+    }
+
+    #[test]
+    fn deserializes_create_note_activity() {
+        let json = r#"{
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://remote.example/activities/1",
+            "type": "Create",
+            "actor": "https://remote.example/users/alice",
+            "object": {
+                "id": "https://remote.example/notes/1",
+                "type": "Note",
+                "attributedTo": "https://remote.example/users/alice",
+                "content": "<p>test</p>",
+                "to": ["https://www.w3.org/ns/activitystreams#Public"]
+            }
+        }"#;
+
+        let activity: IncomingActivity = serde_json::from_str(json).unwrap();
+        assert_eq!(activity.activity_type, "Create");
+        let obj = activity.object.as_ref().unwrap();
+        let note: Note = serde_json::from_value(obj.clone()).unwrap();
+        assert_eq!(note.id, "https://remote.example/notes/1");
+        assert_eq!(note.best_content(), Some("<p>test</p>"));
+    }
+
+    #[test]
+    fn deserializes_delete_activity_with_bare_object_url() {
+        let json = r#"{
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://remote.example/activities/delete/1",
+            "type": "Delete",
+            "actor": "https://remote.example/users/alice",
+            "object": "https://remote.example/notes/1"
+        }"#;
+
+        let activity: IncomingActivity = serde_json::from_str(json).unwrap();
+        assert_eq!(activity.activity_type, "Delete");
+        let obj = activity.object.as_ref().unwrap();
+        assert_eq!(obj.as_str(), Some("https://remote.example/notes/1"));
+    }
+
+    #[test]
+    fn actor_field_accepts_string_or_object() {
+        // String form (most common)
+        let json = r#"{"type":"Follow","actor":"https://example.com/users/alice","object":""}"#;
+        let a: IncomingActivity = serde_json::from_str(json).unwrap();
+        assert_eq!(a.actor.id(), Some("https://example.com/users/alice"));
+
+        // Object form (less common)
+        let json = r#"{"type":"Follow","actor":{"id":"https://example.com/users/bob","type":"Person"},"object":""}"#;
+        let a: IncomingActivity = serde_json::from_str(json).unwrap();
+        assert_eq!(a.actor.id(), Some("https://example.com/users/bob"));
+    }
+}

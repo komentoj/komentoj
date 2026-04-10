@@ -103,3 +103,109 @@ impl Config {
             .any(|d| d.as_str() == host)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use figment::{providers::{Format, Toml}, Figment};
+
+    fn load_toml(s: &str) -> Result<Config> {
+        Figment::new()
+            .merge(Toml::string(s))
+            .extract()
+            .context("parse test TOML")
+    }
+
+    const VALID_TOML: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[instance]
+domain = "example.com"
+username = "komentoj"
+display_name = "Comments"
+summary = "A comment service"
+blog_domains = ["blog.example.com"]
+
+[database]
+url = "postgres://user:pass@localhost/db"
+max_connections = 5
+
+[redis]
+url = "redis://127.0.0.1:6379"
+actor_cache_ttl = 3600
+
+[cors]
+allowed_origins = ["https://blog.example.com"]
+
+[admin]
+token = "secret-token"
+"#;
+
+    #[test]
+    fn loads_valid_toml() {
+        let cfg = load_toml(VALID_TOML).unwrap();
+        assert_eq!(cfg.instance.domain, "example.com");
+        assert_eq!(cfg.server.port, 8080);
+        assert_eq!(cfg.admin.token, "secret-token");
+        assert_eq!(cfg.instance.blog_domains, vec!["blog.example.com"]);
+    }
+
+    #[test]
+    fn actor_url_format() {
+        let cfg = load_toml(VALID_TOML).unwrap();
+        assert_eq!(cfg.actor_url(), "https://example.com/actor");
+        assert_eq!(cfg.key_id(), "https://example.com/actor#main-key");
+        assert_eq!(cfg.inbox_url(), "https://example.com/inbox");
+    }
+
+    #[test]
+    fn acct_format() {
+        let cfg = load_toml(VALID_TOML).unwrap();
+        assert_eq!(cfg.acct(), "acct:komentoj@example.com");
+    }
+
+    #[test]
+    fn is_blog_url_matches_configured_domains() {
+        let cfg = load_toml(VALID_TOML).unwrap();
+        assert!(cfg.is_blog_url("https://blog.example.com/my-post"));
+        assert!(cfg.is_blog_url("https://blog.example.com/"));
+        assert!(!cfg.is_blog_url("https://other.example.com/post"));
+        assert!(!cfg.is_blog_url("not-a-url"));
+    }
+
+    #[test]
+    fn env_var_overrides_port() {
+        std::env::set_var("KOMENTOJ_SERVER__PORT", "9000");
+        let cfg = Figment::new()
+            .merge(Toml::string(VALID_TOML))
+            .merge(figment::providers::Env::prefixed("KOMENTOJ_").split("__"))
+            .extract::<Config>()
+            .unwrap();
+        assert_eq!(cfg.server.port, 9000);
+        std::env::remove_var("KOMENTOJ_SERVER__PORT");
+    }
+
+    #[test]
+    fn env_var_overrides_admin_token() {
+        std::env::set_var("KOMENTOJ_ADMIN__TOKEN", "env-override-token");
+        let cfg = Figment::new()
+            .merge(Toml::string(VALID_TOML))
+            .merge(figment::providers::Env::prefixed("KOMENTOJ_").split("__"))
+            .extract::<Config>()
+            .unwrap();
+        assert_eq!(cfg.admin.token, "env-override-token");
+        std::env::remove_var("KOMENTOJ_ADMIN__TOKEN");
+    }
+
+    #[test]
+    fn missing_required_field_fails() {
+        let bad_toml = r#"
+[server]
+host = "127.0.0.1"
+# port missing
+"#;
+        assert!(load_toml(bad_toml).is_err());
+    }
+}

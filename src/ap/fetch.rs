@@ -127,7 +127,7 @@ pub async fn fetch_ap_object<T: serde::de::DeserializeOwned>(
         .map_err(|e| AppError::BadRequest(format!("failed to parse AP response from {url}: {e}")))
 }
 
-/// Fetch a remote actor document, using Redis and DB caches if available.
+/// Fetch a remote actor document, using Redis → DB → HTTP in that order.
 pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> {
     let cache_key = format!("actor:{url}");
 
@@ -141,7 +141,21 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
         }
     }
 
-    // 2. Fetch from remote
+    // 2. DB cache — avoids redundant HTTP round-trips for already-known actors
+    //    and lets integration tests work without outbound HTTP calls.
+    if let Ok(Some(raw)) = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT raw_data FROM actor_cache WHERE id = $1",
+    )
+    .bind(url)
+    .fetch_optional(&state.db)
+    .await
+    {
+        if let Ok(actor) = serde_json::from_value::<RemoteActor>(raw) {
+            return Ok(actor);
+        }
+    }
+
+    // 3. Fetch from remote
     let actor: RemoteActor = fetch_ap_object(
         url,
         &state.http,
@@ -150,10 +164,10 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
     )
     .await?;
 
-    // 3. Persist to DB
+    // 4. Persist to DB
     upsert_actor_cache(state, &actor).await?;
 
-    // 4. Write to Redis
+    // 5. Write to Redis
     if let Ok(mut conn) = state.redis.get().await {
         use deadpool_redis::redis::AsyncCommands;
         let json = serde_json::json!({
@@ -256,7 +270,7 @@ pub async fn upsert_actor_cache(state: &AppState, actor: &RemoteActor) -> AppRes
 // ── SSRF guard ────────────────────────────────────────────────────────────────
 
 /// Reject URLs that point to local/private network addresses.
-fn validate_url(url: &str) -> AppResult<()> {
+pub(crate) fn validate_url(url: &str) -> AppResult<()> {
     let parsed = Url::parse(url)
         .map_err(|e| AppError::BadRequest(format!("invalid URL '{url}': {e}")))?;
 
@@ -265,29 +279,36 @@ fn validate_url(url: &str) -> AppResult<()> {
         s => return Err(AppError::BadRequest(format!("disallowed URL scheme: {s}"))),
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AppError::BadRequest("URL has no host".into()))?;
-
-    if host == "localhost" || host == "ip6-localhost" {
-        return Err(AppError::BadRequest(format!(
-            "SSRF: disallowed host '{host}'"
-        )));
-    }
-
-    // Block IP literals that are private/link-local/loopback
-    if let Ok(ip) = IpAddr::from_str(host) {
-        if is_private_ip(ip) {
-            return Err(AppError::BadRequest(format!(
-                "SSRF: disallowed IP address '{ip}'"
-            )));
+    // Use url::Host enum directly — avoids re-parsing IPv6 from string form.
+    match parsed.host() {
+        None => return Err(AppError::BadRequest("URL has no host".into())),
+        Some(url::Host::Domain(h)) => {
+            if h == "localhost" || h == "ip6-localhost" {
+                return Err(AppError::BadRequest(format!(
+                    "SSRF: disallowed host '{h}'"
+                )));
+            }
+        }
+        Some(url::Host::Ipv4(ip)) => {
+            if is_private_ip(IpAddr::V4(ip)) {
+                return Err(AppError::BadRequest(format!(
+                    "SSRF: disallowed IP address '{ip}'"
+                )));
+            }
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if is_private_ip(IpAddr::V6(ip)) {
+                return Err(AppError::BadRequest(format!(
+                    "SSRF: disallowed IP address '{ip}'"
+                )));
+            }
         }
     }
 
     Ok(())
 }
 
-fn is_private_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()
@@ -316,4 +337,126 @@ pub fn extract_host(url: &str) -> AppResult<String> {
         .host_str()
         .ok_or_else(|| AppError::BadRequest("URL has no host".into()))
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    // ── validate_url ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_url_allows_public_https() {
+        assert!(validate_url("https://mastodon.social/users/alice").is_ok());
+        assert!(validate_url("https://8.8.8.8/actor").is_ok());
+    }
+
+    #[test]
+    fn validate_url_allows_public_http() {
+        // http is allowed (some fedi servers still use it)
+        assert!(validate_url("http://example.com/inbox").is_ok());
+    }
+
+    #[test]
+    fn validate_url_blocks_localhost_names() {
+        assert!(validate_url("http://localhost/inbox").is_err());
+        assert!(validate_url("https://ip6-localhost/inbox").is_err());
+    }
+
+    #[test]
+    fn validate_url_blocks_disallowed_schemes() {
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("ftp://example.com/file").is_err());
+        assert!(validate_url("gopher://example.com/").is_err());
+    }
+
+    #[test]
+    fn validate_url_blocks_private_ipv4_literals() {
+        // loopback
+        assert!(validate_url("http://127.0.0.1/inbox").is_err());
+        // RFC 1918 — Class A
+        assert!(validate_url("http://10.0.0.1/inbox").is_err());
+        assert!(validate_url("http://10.255.255.255/inbox").is_err());
+        // RFC 1918 — Class B
+        assert!(validate_url("http://172.16.0.1/inbox").is_err());
+        assert!(validate_url("http://172.31.255.255/inbox").is_err());
+        // RFC 1918 — Class C
+        assert!(validate_url("http://192.168.0.1/inbox").is_err());
+        assert!(validate_url("http://192.168.255.255/inbox").is_err());
+        // link-local
+        assert!(validate_url("http://169.254.0.1/inbox").is_err());
+        // CGNAT 100.64.0.0/10
+        assert!(validate_url("http://100.64.0.1/inbox").is_err());
+        assert!(validate_url("http://100.127.255.255/inbox").is_err());
+    }
+
+    #[test]
+    fn validate_url_blocks_private_ipv6_literals() {
+        assert!(validate_url("http://[::1]/inbox").is_err());
+        assert!(validate_url("http://[fe80::1]/inbox").is_err());
+        assert!(validate_url("http://[fc00::1]/inbox").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_malformed() {
+        assert!(validate_url("not-a-url").is_err());
+        assert!(validate_url("").is_err());
+    }
+
+    // ── is_private_ip — table-driven ──────────────────────────────────────────
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse::<Ipv6Addr>().unwrap())
+    }
+
+    #[test]
+    fn private_ip_blocks_rfc1918() {
+        assert!(is_private_ip(v4(10, 0, 0, 1)));
+        assert!(is_private_ip(v4(10, 255, 255, 255)));
+        assert!(is_private_ip(v4(172, 16, 0, 1)));
+        assert!(is_private_ip(v4(172, 31, 255, 255)));
+        assert!(is_private_ip(v4(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn private_ip_blocks_loopback() {
+        assert!(is_private_ip(v4(127, 0, 0, 1)));
+        assert!(is_private_ip(v4(127, 255, 255, 255)));
+        assert!(is_private_ip(v6("::1")));
+    }
+
+    #[test]
+    fn private_ip_blocks_link_local() {
+        assert!(is_private_ip(v4(169, 254, 1, 1)));
+        assert!(is_private_ip(v6("fe80::1")));
+    }
+
+    #[test]
+    fn private_ip_blocks_cgnat() {
+        assert!(is_private_ip(v4(100, 64, 0, 1)));
+        assert!(is_private_ip(v4(100, 100, 0, 1)));
+        assert!(is_private_ip(v4(100, 127, 255, 255)));
+        // Just outside CGNAT range — should be allowed
+        assert!(!is_private_ip(v4(100, 128, 0, 1)));
+    }
+
+    #[test]
+    fn private_ip_blocks_ipv6_ula() {
+        assert!(is_private_ip(v6("fc00::1")));
+        assert!(is_private_ip(v6("fd00::1")));
+        assert!(is_private_ip(v6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")));
+    }
+
+    #[test]
+    fn private_ip_allows_public_addresses() {
+        assert!(!is_private_ip(v4(8, 8, 8, 8)));
+        assert!(!is_private_ip(v4(1, 1, 1, 1)));
+        assert!(!is_private_ip(v4(151, 101, 1, 140)));
+        assert!(!is_private_ip(v6("2001:4860:4860::8888"))); // Google DNS
+    }
 }

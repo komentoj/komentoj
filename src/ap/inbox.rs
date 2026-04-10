@@ -65,7 +65,7 @@ pub async fn inbox_handler(
     }
 }
 
-async fn handle_inbox(
+pub(crate) async fn handle_inbox(
     state: AppState,
     raw_headers: HeaderMap,
     body: Bytes,
@@ -510,7 +510,7 @@ async fn resolve_object(value: &Value, state: &AppState) -> anyhow::Result<Value
 }
 
 /// Extract a string ID from a Value that is either a URL string or an object with `id`.
-fn object_id_from_value(value: &Value) -> String {
+pub(crate) fn object_id_from_value(value: &Value) -> String {
     value
         .as_str()
         .map(str::to_string)
@@ -594,7 +594,7 @@ async fn extract_post_id_by_url(state: &AppState, note: &Note) -> Option<String>
 }
 
 /// Extract all href values from anchor tags in an HTML string.
-fn extract_hrefs_from_html(html: &str) -> Vec<String> {
+pub(crate) fn extract_hrefs_from_html(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = html;
     while let Some(pos) = rest.find("href=\"") {
@@ -609,7 +609,7 @@ fn extract_hrefs_from_html(html: &str) -> Vec<String> {
     urls
 }
 
-fn parse_published(s: Option<&str>) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_published(s: Option<&str>) -> Option<DateTime<Utc>> {
     s.and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
 }
@@ -639,5 +639,408 @@ async fn ensure_actor_cached(state: &AppState, actor_url: &str) {
         if let Err(e) = fetch_actor(actor_url, state).await {
             tracing::warn!("failed to cache actor {actor_url}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use axum::body::Bytes;
+    use chrono::Datelike;
+    use std::time::Duration;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    // ── Pure function unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn extract_hrefs_finds_https_links() {
+        let html = r#"<p>See <a href="https://blog.example.com/post-1">this post</a> and <a href="https://other.example/foo">that</a>.</p>"#;
+        let urls = extract_hrefs_from_html(html);
+        assert_eq!(urls, vec![
+            "https://blog.example.com/post-1",
+            "https://other.example/foo",
+        ]);
+    }
+
+    #[test]
+    fn extract_hrefs_skips_non_http() {
+        let html = r#"<a href="mailto:user@example.com">mail</a> <a href="https://good.com/x">ok</a>"#;
+        let urls = extract_hrefs_from_html(html);
+        assert_eq!(urls, vec!["https://good.com/x"]);
+    }
+
+    #[test]
+    fn extract_hrefs_empty_when_no_links() {
+        assert!(extract_hrefs_from_html("<p>plain text</p>").is_empty());
+        assert!(extract_hrefs_from_html("").is_empty());
+    }
+
+    #[test]
+    fn parse_published_valid_rfc3339() {
+        let dt = parse_published(Some("2024-01-15T12:00:00Z"));
+        assert!(dt.is_some());
+        let dt = dt.unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 1);
+        assert_eq!(dt.day(), 15);
+    }
+
+    #[test]
+    fn parse_published_invalid_returns_none() {
+        assert!(parse_published(Some("not a date")).is_none());
+        assert!(parse_published(Some("2024-13-01T00:00:00Z")).is_none());
+        assert!(parse_published(None).is_none());
+    }
+
+    #[test]
+    fn object_id_from_string_value() {
+        let v = serde_json::json!("https://remote.example/notes/1");
+        assert_eq!(object_id_from_value(&v), "https://remote.example/notes/1");
+    }
+
+    #[test]
+    fn object_id_from_object_with_id_field() {
+        let v = serde_json::json!({"id": "https://remote.example/notes/2", "type": "Note"});
+        assert_eq!(object_id_from_value(&v), "https://remote.example/notes/2");
+    }
+
+    #[test]
+    fn object_id_from_unknown_value_is_empty() {
+        assert_eq!(object_id_from_value(&serde_json::json!(null)), "");
+        assert_eq!(object_id_from_value(&serde_json::json!(42)), "");
+    }
+
+    // ── Integration tests (require DATABASE_URL) ──────────────────────────────
+    //
+    // These use sqlx::test which creates a fresh PostgreSQL database per test,
+    // runs all migrations, and tears down afterwards.
+    // Set DATABASE_URL=postgres://user:pass@localhost/komentoj_test to run.
+
+    // Helper: convert our HashMap headers to axum's HeaderMap
+    fn header_map(h: &std::collections::HashMap<String, String>) -> HeaderMap {
+        crate::test_helpers::to_header_map(h)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_rejects_missing_signature(pool: sqlx::PgPool) {
+        let state = make_test_state(pool, TEST_DOMAIN).await;
+        let body = Bytes::from(b"{}".to_vec());
+        let headers = HeaderMap::new(); // no Signature header
+
+        let result = handle_inbox(state, headers, body).await;
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_rejects_invalid_signature(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+
+        let activity = make_follow_activity(
+            "https://remote.example/follows/1",
+            actor_url,
+            &our_actor_url(),
+        );
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+
+        // Build headers but with a corrupted signature
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let mut headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+        headers.insert("signature".into(), "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into());
+
+        let result = handle_inbox(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_rejects_actor_mismatch(pool: sqlx::PgPool) {
+        // Key belongs to alice but activity claims bob as actor
+        let alice_url = "https://remote.example/users/alice";
+        let bob_url = "https://remote.example/users/bob";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, alice_url, inbox_url).await;
+
+        // Activity actor is bob, but signed with alice's key
+        let activity = make_follow_activity(
+            "https://remote.example/follows/1",
+            bob_url,        // ← actor field claims bob
+            &our_actor_url(),
+        );
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", alice_url); // ← signed by alice
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        let result = handle_inbox(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_follow_creates_follower_and_sends_accept(pool: sqlx::PgPool) {
+        // Start a wiremock server to capture the Accept delivery
+        let mock_server = MockServer::start().await;
+
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = format!("{}/inbox/alice", mock_server.uri());
+        let follow_id = "https://remote.example/follows/99";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, &inbox_url).await;
+
+        // Capture Accept(Follow) delivery
+        Mock::given(method("POST"))
+            .and(path("/inbox/alice"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let activity = make_follow_activity(follow_id, actor_url, &our_actor_url());
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+            .await
+            .expect("inbox handle failed");
+
+        // Wait for background task to finish
+        wait_for(Duration::from_secs(2), || async {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+                .bind(actor_url)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+            count == 1
+        })
+        .await;
+
+        // Accept was delivered to the mock inbox
+        let received = mock_server.received_requests().await.unwrap();
+        assert!(!received.is_empty(), "Accept should have been delivered");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_follow_ignored_when_object_is_wrong(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+
+        // Follow directed at someone else, not our actor
+        let activity = make_follow_activity(
+            "https://remote.example/follows/2",
+            actor_url,
+            "https://other.example/actor", // ← wrong target
+        );
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+            .await
+            .expect("inbox should return Ok (activity is ignored, not rejected)");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "no follower should be added for wrong-target Follow");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_create_stores_comment(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+        let post_id = "my-test-post";
+        let post_url = "https://blog.example.com/my-test-post";
+        let ap_note_id = format!("https://{}/notes/post-1", TEST_DOMAIN);
+        let note_id = "https://remote.example/notes/comment-1";
+        let activity_id = "https://remote.example/activities/create-1";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+        insert_test_post(&pool, post_id, post_url, &ap_note_id).await;
+
+        let note = make_note_json(
+            note_id,
+            actor_url,
+            "<p>Great post!</p>",
+            Some(&ap_note_id), // inReplyTo our announcement Note
+        );
+        let activity = make_create_activity(activity_id, actor_url, note);
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+            .await
+            .expect("inbox handle failed");
+
+        wait_for(Duration::from_secs(2), || async {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = $1")
+                .bind(note_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+            count == 1
+        })
+        .await;
+
+        // Verify content was sanitized and stored
+        let html: String = sqlx::query_scalar("SELECT content_html FROM comments WHERE id = $1")
+            .bind(note_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(html.contains("Great post!"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_duplicate_activity_is_deduplicated(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+        let post_id = "dedup-post";
+        let ap_note_id = format!("https://{}/notes/dedup-note", TEST_DOMAIN);
+        let note_id = "https://remote.example/notes/dedup-comment";
+        let activity_id = "https://remote.example/activities/dedup-1";
+
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+        insert_test_post(&pool, post_id, "https://blog.example.com/dedup", &ap_note_id).await;
+
+        let note = make_note_json(note_id, actor_url, "<p>duplicate</p>", Some(&ap_note_id));
+        let activity = make_create_activity(activity_id, actor_url, note);
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+
+        // Send the same activity twice
+        for _ in 0..2 {
+            let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+            handle_inbox(
+                make_test_state(pool.clone(), TEST_DOMAIN).await,
+                header_map(&headers),
+                Bytes::from(body_bytes.clone()),
+            )
+            .await
+            .expect("inbox handle failed");
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = $1")
+            .bind(note_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "duplicate activity must produce exactly one comment");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_undo_follow_removes_follower(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+
+        // Seed an existing follower record
+        sqlx::query("INSERT INTO followers (actor_id, inbox_url, accepted) VALUES ($1,$2,TRUE)")
+            .bind(actor_url)
+            .bind(inbox_url)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let activity = make_undo_follow_activity(
+            "https://remote.example/undo/1",
+            actor_url,
+            "https://remote.example/follows/old",
+            &our_actor_url(),
+        );
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+            .await
+            .expect("inbox handle failed");
+
+        wait_for(Duration::from_secs(2), || async {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+                .bind(actor_url)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(1);
+            count == 0
+        })
+        .await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inbox_delete_soft_deletes_comment(pool: sqlx::PgPool) {
+        let actor_url = "https://remote.example/users/alice";
+        let inbox_url = "https://remote.example/users/alice/inbox";
+        let post_id = "delete-post";
+        let ap_note_id = format!("https://{}/notes/delete-note", TEST_DOMAIN);
+        let note_id = "https://remote.example/notes/to-delete";
+
+        let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
+        insert_test_actor(&pool, actor_url, inbox_url).await;
+        insert_test_post(&pool, post_id, "https://blog.example.com/delete", &ap_note_id).await;
+
+        // Seed an existing comment
+        sqlx::query(
+            r#"INSERT INTO comments
+               (id, post_id, actor_id, content_html, published_at, in_reply_to_local, visibility, raw_data)
+               VALUES ($1,$2,$3,'<p>old</p>',NOW(),FALSE,'public','{}'"#,
+        )
+        .bind(note_id)
+        .bind(post_id)
+        .bind(actor_url)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let activity = make_delete_activity(
+            "https://remote.example/activities/delete-1",
+            actor_url,
+            note_id,
+        );
+        let body_bytes = serde_json::to_vec(&activity).unwrap();
+        let key = test_key();
+        let key_id = format!("{}#main-key", actor_url);
+        let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
+
+        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+            .await
+            .expect("inbox handle failed");
+
+        wait_for(Duration::from_secs(2), || async {
+            let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT deleted_at FROM comments WHERE id = $1")
+                    .bind(note_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(None);
+            deleted_at.is_some()
+        })
+        .await;
     }
 }

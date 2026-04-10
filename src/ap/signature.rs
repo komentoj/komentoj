@@ -402,6 +402,9 @@ pub fn key_id_to_actor_url(key_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    // ── Unit tests ────────────────────────────────────────────────────────────
 
     #[test]
     fn split_signature_params_handles_commas_in_quotes() {
@@ -433,5 +436,112 @@ mod tests {
             key_id_to_actor_url("https://example.com/actor"),
             "https://example.com/actor"
         );
+    }
+
+    // ── Sign + verify round-trip ──────────────────────────────────────────────
+    // Uses the shared test RSA key to avoid generating a new key per test.
+
+    fn make_headers(sig: &SignedRequestHeaders, digest: &str, host: &str) -> HashMap<String, String> {
+        let mut h = HashMap::new();
+        h.insert("host".into(), host.into());
+        h.insert("date".into(), sig.date.clone());
+        h.insert("signature".into(), sig.signature.clone());
+        h.insert("digest".into(), digest.to_string());
+        h
+    }
+
+    #[test]
+    fn sign_and_verify_post_roundtrip() {
+        let key = crate::test_helpers::test_key();
+        let body = br#"{"type":"Follow","actor":"https://remote.example/users/alice"}"#;
+        let key_id = "https://remote.example/users/alice#main-key";
+
+        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
+            .unwrap();
+        let digest = compute_digest(body);
+
+        let headers = make_headers(&sig, &digest, "test.example");
+        assert!(verify_request("post", "/inbox", &headers, body, &key.public_key_pem).is_ok());
+    }
+
+    #[test]
+    fn sign_and_verify_get_roundtrip() {
+        let key = crate::test_helpers::test_key();
+        let key_id = "https://remote.example/actor#main-key";
+
+        let sig = sign_request("get", "/actor", "test.example", None, &key.private_key, key_id)
+            .unwrap();
+
+        let mut headers = HashMap::new();
+        headers.insert("host".into(), "test.example".into());
+        headers.insert("date".into(), sig.date.clone());
+        headers.insert("signature".into(), sig.signature.clone());
+
+        // GET has no body; verify should pass without a digest header
+        assert!(verify_request("get", "/actor", &headers, b"", &key.public_key_pem).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_tampered_body() {
+        let key = crate::test_helpers::test_key();
+        let body = b"original body";
+        let tampered = b"tampered body";
+        let key_id = "https://remote.example/actor#main-key";
+
+        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
+            .unwrap();
+        let digest = compute_digest(body); // digest of ORIGINAL
+
+        let mut headers = make_headers(&sig, &digest, "test.example");
+        // Body is tampered but digest still refers to original — should fail digest check
+        let tampered_digest = compute_digest(tampered);
+        headers.insert("digest".into(), tampered_digest);
+
+        let result = verify_request("post", "/inbox", &headers, tampered, &key.public_key_pem);
+        assert!(result.is_err(), "should reject digest mismatch");
+    }
+
+    #[test]
+    fn verify_rejects_missing_signed_header() {
+        let key = crate::test_helpers::test_key();
+        let body = b"{}";
+        let key_id = "https://remote.example/actor#main-key";
+
+        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
+            .unwrap();
+        let digest = compute_digest(body);
+
+        let mut headers = make_headers(&sig, &digest, "test.example");
+        // Remove the host header — it's listed in the signature but now absent
+        headers.remove("host");
+
+        let result = verify_request("post", "/inbox", &headers, body, &key.public_key_pem);
+        assert!(result.is_err(), "should reject absent signed header");
+    }
+
+    #[test]
+    fn verify_rejects_stale_date() {
+        let key = crate::test_helpers::test_key();
+        let body = b"{}";
+        let key_id = "https://remote.example/actor#main-key";
+
+        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
+            .unwrap();
+        let digest = compute_digest(body);
+
+        let mut headers = make_headers(&sig, &digest, "test.example");
+        // Replace with a date from 2020 — well outside the ±5-minute window
+        headers.insert("date".into(), "Mon, 01 Jan 2024 00:00:00 GMT".into());
+
+        let result = verify_request("post", "/inbox", &headers, body, &key.public_key_pem);
+        assert!(result.is_err(), "should reject stale date");
+    }
+
+    #[test]
+    fn compute_digest_format() {
+        let d = compute_digest(b"hello");
+        assert!(d.starts_with("SHA-256="), "should use RFC 3230 format");
+        // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        assert!(d.contains("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ="));
     }
 }

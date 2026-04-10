@@ -4,6 +4,9 @@ mod config;
 mod error;
 mod state;
 
+#[cfg(test)]
+mod test_helpers;
+
 use crate::{
     ap::{
         actor::{
