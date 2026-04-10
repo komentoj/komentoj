@@ -22,8 +22,8 @@ _fail_msgs=()
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-ok()   { echo "  [PASS] $*"; ((PASS++)); }
-fail() { echo "  [FAIL] $*"; ((FAIL++)); _fail_msgs+=("$*"); }
+ok()   { echo "  [PASS] $*"; PASS=$((PASS + 1)); }
+fail() { echo "  [FAIL] $*"; FAIL=$((FAIL + 1)); _fail_msgs+=("$*"); }
 
 assert_eq() {
     local label="$1" got="$2" want="$3"
