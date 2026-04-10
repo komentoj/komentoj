@@ -1,5 +1,3 @@
-version: "3.9"
-
 # E2E federation test environment
 #
 # Runs komentoj + GoToSocial on an isolated Docker bridge network so they
