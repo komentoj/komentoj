@@ -359,7 +359,7 @@ async fn handle_follow(
     // Reject Follow activities not directed at our actor — any signed delivery
     // to /inbox would otherwise subscribe the sender to this service's fan-out.
     let our_actor = state.config.actor_url();
-    let object_id = activity.object.as_ref().map(|o| object_id_from_value(o));
+    let object_id = activity.object.as_ref().map(object_id_from_value);
     if object_id.as_deref() != Some(our_actor.as_str()) {
         tracing::debug!(
             "Follow: object {:?} does not match our actor, ignoring",

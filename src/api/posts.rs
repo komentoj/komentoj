@@ -144,33 +144,29 @@ pub async fn sync_posts(
                 url: post.url,
                 content: post.content,
             },
-            Some((prev_title, prev_url, prev_content, note_id_opt, registered_at)) => {
-                match note_id_opt {
-                    None => Action::Publish {
+            Some((_, _, _, None, _)) => Action::Publish {
+                id: post.id,
+                title: post.title,
+                url: post.url,
+                content: post.content,
+            },
+            Some((prev_title, prev_url, prev_content, Some(note_id), registered_at)) => {
+                let changed = prev_title.as_deref() != post.title.as_deref()
+                    || prev_url != post.url
+                    || prev_content != post.content;
+                if changed {
+                    Action::Update {
                         id: post.id,
                         title: post.title,
                         url: post.url,
                         content: post.content,
-                    },
-                    Some(note_id) => {
-                        let changed = prev_title.as_deref() != post.title.as_deref()
-                            || prev_url != post.url
-                            || prev_content != post.content;
-                        if changed {
-                            Action::Update {
-                                id: post.id,
-                                title: post.title,
-                                url: post.url,
-                                content: post.content,
-                                note_id,
-                                registered_at: registered_at
-                                    .format("%Y-%m-%dT%H:%M:%SZ")
-                                    .to_string(),
-                            }
-                        } else {
-                            Action::NoOp
-                        }
+                        note_id,
+                        registered_at: registered_at
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string(),
                     }
+                } else {
+                    Action::NoOp
                 }
             }
         };

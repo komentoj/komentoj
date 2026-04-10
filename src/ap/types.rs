@@ -88,7 +88,7 @@ impl StringOrArray {
     }
 
     pub fn contains(&self, needle: &str) -> bool {
-        self.to_vec().iter().any(|s| *s == needle)
+        self.to_vec().contains(&needle)
     }
 }
 

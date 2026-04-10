@@ -324,7 +324,7 @@ fn verify_digest_rfc9530(header: &str, actual: &[u8]) -> AppResult<()> {
 fn check_date_freshness(date_str: &str) -> AppResult<()> {
     // Try parsing as HTTP-date (RFC 7231 / RFC 1123)
     let dt = httpdate::parse_http_date(date_str)
-        .map(|st| DateTime::<Utc>::from(st))
+        .map(DateTime::<Utc>::from)
         .map_err(|_| AppError::Unauthorized(format!("invalid Date header: {date_str}")))?;
 
     let now = Utc::now();
