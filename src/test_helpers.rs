@@ -13,8 +13,7 @@
 use crate::{
     ap::signature::{compute_digest, sign_request},
     config::{
-        AdminConfig, Config, CorsConfig, DatabaseConfig, InstanceConfig, RedisConfig,
-        ServerConfig,
+        AdminConfig, Config, CorsConfig, DatabaseConfig, InstanceConfig, RedisConfig, ServerConfig,
     },
     state::{AppState, InstanceKey},
 };
@@ -23,7 +22,11 @@ use reqwest::Client;
 use rsa::pkcs8::{EncodePublicKey, LineEnding};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use std::{collections::HashMap, sync::{Arc, OnceLock}, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 // ── Singleton test RSA key ────────────────────────────────────────────────────
 
@@ -46,7 +49,11 @@ pub fn test_key() -> &'static TestKeyPair {
         let public_key_pem = public_key
             .to_public_key_pem(LineEnding::LF)
             .expect("PEM encoding failed");
-        TestKeyPair { private_key, public_key, public_key_pem }
+        TestKeyPair {
+            private_key,
+            public_key,
+            public_key_pem,
+        }
     })
 }
 
@@ -212,7 +219,10 @@ pub fn to_header_map(headers: &HashMap<String, String>) -> axum::http::HeaderMap
 /// * The instance RSA key is the shared `test_key()` singleton.
 pub async fn make_test_state(pool: PgPool, domain: &str) -> AppState {
     let config = Config {
-        server: ServerConfig { host: "127.0.0.1".into(), port: 8080 },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 8080,
+        },
         instance: InstanceConfig {
             domain: domain.to_string(),
             protocol: "https".into(),
@@ -221,13 +231,20 @@ pub async fn make_test_state(pool: PgPool, domain: &str) -> AppState {
             summary: "Test instance".into(),
             blog_domains: vec!["blog.example.com".into()],
         },
-        database: DatabaseConfig { url: String::new(), max_connections: 5 },
+        database: DatabaseConfig {
+            url: String::new(),
+            max_connections: 5,
+        },
         redis: RedisConfig {
             url: "redis://127.0.0.1:65535".into(),
             actor_cache_ttl: 3600,
         },
-        cors: CorsConfig { allowed_origins: vec![] },
-        admin: AdminConfig { token: "test-admin-token".into() },
+        cors: CorsConfig {
+            allowed_origins: vec![],
+        },
+        admin: AdminConfig {
+            token: "test-admin-token".into(),
+        },
     };
 
     let redis = PoolConfig::from_url("redis://127.0.0.1:65535")

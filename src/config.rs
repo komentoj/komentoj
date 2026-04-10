@@ -119,7 +119,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use figment::{providers::{Format, Toml}, Figment};
+    use figment::{
+        providers::{Format, Toml},
+        Figment,
+    };
 
     fn load_toml(s: &str) -> Result<Config> {
         Figment::new()

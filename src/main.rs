@@ -1,5 +1,5 @@
-mod api;
 mod ap;
+mod api;
 mod config;
 mod error;
 mod state;
@@ -81,11 +81,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
-    let addr: SocketAddr = format!(
-        "{}:{}",
-        state.config.server.host, state.config.server.port
-    )
-    .parse()?;
+    let addr: SocketAddr =
+        format!("{}:{}", state.config.server.host, state.config.server.port).parse()?;
 
     tracing::info!("listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

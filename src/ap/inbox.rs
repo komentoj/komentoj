@@ -23,7 +23,9 @@ use crate::{
     ap::{
         fetch::{extract_host, fetch_actor, fetch_note},
         html,
-        signature::{compute_digest, extract_key_id, key_id_to_actor_url, sign_request, verify_request},
+        signature::{
+            compute_digest, extract_key_id, key_id_to_actor_url, sign_request, verify_request,
+        },
         types::{IncomingActivity, Note},
     },
     error::{AppError, AppResult},
@@ -73,9 +75,7 @@ pub(crate) async fn handle_inbox(
     // Normalise all header names to lowercase for signing string reconstruction
     let headers: HashMap<String, String> = raw_headers
         .iter()
-        .filter_map(|(k, v)| {
-            Some((k.as_str().to_lowercase(), v.to_str().ok()?.to_string()))
-        })
+        .filter_map(|(k, v)| Some((k.as_str().to_lowercase(), v.to_str().ok()?.to_string())))
         .collect();
 
     let sig_header = headers
@@ -147,12 +147,10 @@ pub(crate) async fn handle_inbox(
     tokio::spawn(async move {
         if let Err(e) = process_activity(state_clone.clone(), activity).await {
             tracing::error!("activity processing error: {e:#}");
-            let _ = sqlx::query(
-                "DELETE FROM processed_activities WHERE activity_id = $1",
-            )
-            .bind(&aid)
-            .execute(&state_clone.db)
-            .await;
+            let _ = sqlx::query("DELETE FROM processed_activities WHERE activity_id = $1")
+                .bind(&aid)
+                .execute(&state_clone.db)
+                .await;
         }
     });
 
@@ -161,10 +159,7 @@ pub(crate) async fn handle_inbox(
 
 // ── Activity dispatcher ───────────────────────────────────────────────────────
 
-async fn process_activity(
-    state: AppState,
-    activity: IncomingActivity,
-) -> anyhow::Result<()> {
+async fn process_activity(state: AppState, activity: IncomingActivity) -> anyhow::Result<()> {
     let actor_id = activity.actor.id().unwrap_or("").to_string();
 
     match activity.activity_type.as_str() {
@@ -205,9 +200,15 @@ async fn handle_create(
     }
 
     // Verify attributedTo matches the signing actor
-    let attributed = note.attributed_to.as_ref().and_then(|a| a.id()).unwrap_or("");
+    let attributed = note
+        .attributed_to
+        .as_ref()
+        .and_then(|a| a.id())
+        .unwrap_or("");
     if !attributed.is_empty() && attributed != actor_id {
-        tracing::warn!("Create: attributedTo mismatch (signer={actor_id}, attributed={attributed})");
+        tracing::warn!(
+            "Create: attributedTo mismatch (signer={actor_id}, attributed={attributed})"
+        );
         return Ok(());
     }
 
@@ -223,7 +224,10 @@ async fn handle_create(
     //  2. inReplyTo is a comment we already know    ← reply-to-reply
     //  3. Note content contains a URL matching posts.url ← mention fallback
     let Some(post_id) = resolve_post_id(state, &note).await else {
-        tracing::debug!("Create: cannot associate note {} with any registered post", note.id);
+        tracing::debug!(
+            "Create: cannot associate note {} with any registered post",
+            note.id
+        );
         return Ok(());
     };
 
@@ -233,7 +237,11 @@ async fn handle_create(
     let content_html = html::sanitize_note_html(note.best_content().unwrap_or(""));
     let content_source = note.markdown_source().map(str::to_string);
     let published_at = parse_published(note.published.as_deref()).unwrap_or_else(Utc::now);
-    let in_reply_to = note.in_reply_to.as_ref().and_then(|r| r.id()).map(str::to_string);
+    let in_reply_to = note
+        .in_reply_to
+        .as_ref()
+        .and_then(|r| r.id())
+        .map(str::to_string);
 
     let in_reply_to_local = in_reply_to
         .as_deref()
@@ -285,7 +293,11 @@ async fn handle_update(
         .map_err(|e| anyhow::anyhow!("failed to parse Note for Update: {e}"))?;
 
     // Only the owner can update
-    let attributed = note.attributed_to.as_ref().and_then(|a| a.id()).unwrap_or("");
+    let attributed = note
+        .attributed_to
+        .as_ref()
+        .and_then(|a| a.id())
+        .unwrap_or("");
     if !attributed.is_empty() && attributed != actor_id {
         return Ok(());
     }
@@ -616,24 +628,21 @@ pub(crate) fn parse_published(s: Option<&str>) -> Option<DateTime<Utc>> {
 
 /// Get cached public key PEM from the database (without fetching remote).
 async fn get_cached_public_key_pem(state: &AppState, actor_url: &str) -> AppResult<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT public_key_pem FROM actor_cache WHERE id = $1",
-    )
-    .bind(actor_url)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound)
+    sqlx::query_scalar::<_, String>("SELECT public_key_pem FROM actor_cache WHERE id = $1")
+        .bind(actor_url)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound)
 }
 
 /// Ensure the actor exists in our DB cache; fetch if not present.
 async fn ensure_actor_cached(state: &AppState, actor_url: &str) {
-    let exists: bool = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM actor_cache WHERE id = $1)",
-    )
-    .bind(actor_url)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
+    let exists: bool =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM actor_cache WHERE id = $1)")
+            .bind(actor_url)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(false);
 
     if !exists {
         if let Err(e) = fetch_actor(actor_url, state).await {
@@ -660,15 +669,19 @@ mod tests {
     fn extract_hrefs_finds_https_links() {
         let html = r#"<p>See <a href="https://blog.example.com/post-1">this post</a> and <a href="https://other.example/foo">that</a>.</p>"#;
         let urls = extract_hrefs_from_html(html);
-        assert_eq!(urls, vec![
-            "https://blog.example.com/post-1",
-            "https://other.example/foo",
-        ]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://blog.example.com/post-1",
+                "https://other.example/foo",
+            ]
+        );
     }
 
     #[test]
     fn extract_hrefs_skips_non_http() {
-        let html = r#"<a href="mailto:user@example.com">mail</a> <a href="https://good.com/x">ok</a>"#;
+        let html =
+            r#"<a href="mailto:user@example.com">mail</a> <a href="https://good.com/x">ok</a>"#;
         let urls = extract_hrefs_from_html(html);
         assert_eq!(urls, vec!["https://good.com/x"]);
     }
@@ -754,7 +767,10 @@ mod tests {
         let key = test_key();
         let key_id = format!("{}#main-key", actor_url);
         let mut headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
-        headers.insert("signature".into(), "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into());
+        headers.insert(
+            "signature".into(),
+            "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into(),
+        );
 
         let result = handle_inbox(state, header_map(&headers), Bytes::from(body_bytes)).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
@@ -773,7 +789,7 @@ mod tests {
         // Activity actor is bob, but signed with alice's key
         let activity = make_follow_activity(
             "https://remote.example/follows/1",
-            bob_url,        // ← actor field claims bob
+            bob_url, // ← actor field claims bob
             &our_actor_url(),
         );
         let body_bytes = serde_json::to_vec(&activity).unwrap();
@@ -816,11 +832,12 @@ mod tests {
 
         // Wait for background task to finish
         wait_for(Duration::from_secs(2), || async {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
-                .bind(actor_url)
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(0);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+                    .bind(actor_url)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(0);
             count == 1
         })
         .await;
@@ -859,7 +876,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 0, "no follower should be added for wrong-target Follow");
+        assert_eq!(
+            count, 0,
+            "no follower should be added for wrong-target Follow"
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -921,7 +941,13 @@ mod tests {
         let activity_id = "https://remote.example/activities/dedup-1";
 
         insert_test_actor(&pool, actor_url, inbox_url).await;
-        insert_test_post(&pool, post_id, "https://blog.example.com/dedup", &ap_note_id).await;
+        insert_test_post(
+            &pool,
+            post_id,
+            "https://blog.example.com/dedup",
+            &ap_note_id,
+        )
+        .await;
 
         let note = make_note_json(note_id, actor_url, "<p>duplicate</p>", Some(&ap_note_id));
         let activity = make_create_activity(activity_id, actor_url, note);
@@ -948,7 +974,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 1, "duplicate activity must produce exactly one comment");
+        assert_eq!(
+            count, 1,
+            "duplicate activity must produce exactly one comment"
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -983,11 +1012,12 @@ mod tests {
             .expect("inbox handle failed");
 
         wait_for(Duration::from_secs(2), || async {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
-                .bind(actor_url)
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(1);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+                    .bind(actor_url)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(1);
             count == 0
         })
         .await;
@@ -1003,7 +1033,13 @@ mod tests {
 
         let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
         insert_test_actor(&pool, actor_url, inbox_url).await;
-        insert_test_post(&pool, post_id, "https://blog.example.com/delete", &ap_note_id).await;
+        insert_test_post(
+            &pool,
+            post_id,
+            "https://blog.example.com/delete",
+            &ap_note_id,
+        )
+        .await;
 
         // Seed an existing comment
         sqlx::query(

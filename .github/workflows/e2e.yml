@@ -24,10 +24,28 @@ jobs:
         with:
           context: .
           tags: komentoj:e2e
-          # Load into the local Docker daemon so docker compose can use it
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── Generate mkcert TLS certs ─────────────────────────────────────────
+      - name: Install mkcert
+        run: |
+          sudo apt-get install -y libnss3-tools
+          curl -fsSL "https://dl.filippo.io/mkcert/latest?for=linux/amd64" \
+            -o /tmp/mkcert
+          sudo install -m 0755 /tmp/mkcert /usr/local/bin/mkcert
+
+      - name: Generate TLS certificates
+        run: |
+          mkdir -p e2e/certs
+          # Install CA into system trust (makes curl trust mkcert certs)
+          mkcert -install
+          mkcert \
+            -cert-file e2e/certs/local.crt \
+            -key-file  e2e/certs/local.key \
+            komentoj.local gotosocial.local
+          cp "$(mkcert -CAROOT)/rootCA.pem" e2e/certs/rootCA.pem
 
       # ── Start the full stack ──────────────────────────────────────────────
       - name: Start E2E stack
@@ -35,25 +53,24 @@ jobs:
           KOMENTOJ_IMAGE=komentoj:e2e \
             docker compose -f docker-compose.e2e.yml up -d --no-build
 
-      # ── Wait for both services to pass their healthchecks ─────────────────
+      # ── Wait for services to be reachable via Caddy HTTPS ────────────────
       - name: Wait for services healthy
         run: |
-          echo "Waiting for komentoj..."
+          RESOLVE="--resolve komentoj.local:443:127.0.0.1 --resolve gotosocial.local:443:127.0.0.1 --resolve gotosocial.local:8888:127.0.0.1"
+          CACERT="--cacert e2e/certs/rootCA.pem"
+
+          echo "Waiting for komentoj (via Caddy HTTPS)..."
           for i in $(seq 1 24); do
-            if docker compose -f docker-compose.e2e.yml ps komentoj \
-                | grep -q "healthy"; then
-              echo "komentoj healthy"
-              break
+            if curl -sf $RESOLVE $CACERT 'https://komentoj.local/.well-known/webfinger?resource=acct:komentoj@komentoj.local' >/dev/null 2>&1; then
+              echo "komentoj ready"; break
             fi
             sleep 5
           done
 
-          echo "Waiting for GoToSocial..."
-          for i in $(seq 1 36); do
-            if docker compose -f docker-compose.e2e.yml ps gotosocial \
-                | grep -q "healthy"; then
-              echo "gotosocial healthy"
-              break
+          echo "Waiting for GoToSocial (via Caddy HTTPS)..."
+          for i in $(seq 1 60); do
+            if curl -sf $RESOLVE $CACERT https://gotosocial.local:8888/api/v1/instance >/dev/null 2>&1; then
+              echo "gotosocial ready"; break
             fi
             sleep 5
           done
@@ -66,6 +83,7 @@ jobs:
       - name: Dump service logs
         if: failure()
         run: |
+          echo "=== caddy ===" && docker compose -f docker-compose.e2e.yml logs caddy
           echo "=== komentoj ===" && docker compose -f docker-compose.e2e.yml logs komentoj
           echo "=== gotosocial ===" && docker compose -f docker-compose.e2e.yml logs gotosocial
 

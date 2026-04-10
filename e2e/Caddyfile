@@ -1,0 +1,18 @@
+{
+    admin off
+}
+
+https://komentoj.local {
+    tls /etc/caddy/certs/local.crt /etc/caddy/certs/local.key
+    reverse_proxy komentoj:8080
+}
+
+https://gotosocial.local {
+    tls /etc/caddy/certs/local.crt /etc/caddy/certs/local.key
+    reverse_proxy gotosocial:8888
+}
+
+https://gotosocial.local:8888 {
+    tls /etc/caddy/certs/local.crt /etc/caddy/certs/local.key
+    reverse_proxy gotosocial:8888
+}

@@ -131,20 +131,21 @@ pub fn render_note_html(title: Option<&str>, url: &str, content_md: &str) -> Str
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;");
-        html.push_str(&format!(r#"<p><strong><a href="{url}">{t_esc}</a></strong></p>"#));
+        html.push_str(&format!(
+            r#"<p><strong><a href="{url}">{t_esc}</a></strong></p>"#
+        ));
     }
 
     // Render Markdown body with GFM (tables, strikethrough, autolinks, task lists)
     if !content_md.is_empty() {
-        let body = to_html_with_options(content_md, &Options::gfm())
-            .unwrap_or_else(|_| {
-                // markdown-rs shouldn't fail on GFM, but fall back to plain text
-                let escaped = content_md
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                format!("<p>{escaped}</p>")
-            });
+        let body = to_html_with_options(content_md, &Options::gfm()).unwrap_or_else(|_| {
+            // markdown-rs shouldn't fail on GFM, but fall back to plain text
+            let escaped = content_md
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!("<p>{escaped}</p>")
+        });
         html.push_str(&body);
     }
 

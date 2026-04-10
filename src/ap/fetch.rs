@@ -15,8 +15,7 @@ use rsa::RsaPrivateKey;
 use std::{net::IpAddr, time::Duration};
 use url::Url;
 
-const ACCEPT_AP: &str =
-    r#"application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"; q=0.9"#;
+const ACCEPT_AP: &str = r#"application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"; q=0.9"#;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -42,22 +41,17 @@ pub fn build_http_client() -> reqwest::Result<Client> {
             let host = attempt.url().host_str().map(str::to_string);
             match scheme.as_str() {
                 "http" | "https" => {}
-                s => {
-                    return attempt
-                        .error(anyhow::anyhow!("disallowed redirect scheme: {s}"))
-                }
+                s => return attempt.error(anyhow::anyhow!("disallowed redirect scheme: {s}")),
             }
             let Some(host) = host else {
                 return attempt.error(anyhow::anyhow!("redirect URL has no host"));
             };
             if host == "localhost" || host == "ip6-localhost" {
-                return attempt
-                    .error(anyhow::anyhow!("SSRF: disallowed redirect host '{host}'"));
+                return attempt.error(anyhow::anyhow!("SSRF: disallowed redirect host '{host}'"));
             }
             if let Ok(ip) = host.parse::<IpAddr>() {
                 if is_private_ip(ip) {
-                    return attempt
-                        .error(anyhow::anyhow!("SSRF: disallowed redirect IP '{ip}'"));
+                    return attempt.error(anyhow::anyhow!("SSRF: disallowed redirect IP '{ip}'"));
                 }
             }
             attempt.follow()
@@ -74,8 +68,7 @@ pub async fn fetch_ap_object<T: serde::de::DeserializeOwned>(
 ) -> AppResult<T> {
     validate_url(url)?;
 
-    let parsed = Url::parse(url)
-        .map_err(|e| AppError::BadRequest(format!("invalid URL: {e}")))?;
+    let parsed = Url::parse(url).map_err(|e| AppError::BadRequest(format!("invalid URL: {e}")))?;
 
     let host = parsed
         .host_str()
@@ -87,14 +80,7 @@ pub async fn fetch_ap_object<T: serde::de::DeserializeOwned>(
         path.to_string()
     };
 
-    let headers = signature::sign_request(
-        "get",
-        &path_and_query,
-        host,
-        None,
-        private_key,
-        key_id,
-    )?;
+    let headers = signature::sign_request("get", &path_and_query, host, None, private_key, key_id)?;
 
     let response = client
         .get(url)
@@ -143,12 +129,11 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
 
     // 2. DB cache — avoids redundant HTTP round-trips for already-known actors
     //    and lets integration tests work without outbound HTTP calls.
-    if let Ok(Some(raw)) = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT raw_data FROM actor_cache WHERE id = $1",
-    )
-    .bind(url)
-    .fetch_optional(&state.db)
-    .await
+    if let Ok(Some(raw)) =
+        sqlx::query_scalar::<_, serde_json::Value>("SELECT raw_data FROM actor_cache WHERE id = $1")
+            .bind(url)
+            .fetch_optional(&state.db)
+            .await
     {
         if let Ok(actor) = serde_json::from_value::<RemoteActor>(raw) {
             return Ok(actor);
@@ -156,13 +141,31 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
     }
 
     // 3. Fetch from remote
-    let actor: RemoteActor = fetch_ap_object(
+    let mut actor: RemoteActor = fetch_ap_object(
         url,
         &state.http,
         &state.key.private_key,
         &state.config.key_id(),
     )
     .await?;
+
+    // Some servers (e.g. GoToSocial) return a partial actor document when
+    // the key URL is fetched directly (e.g. /users/alice/main-key).  The
+    // response contains the public key but no inbox.  When that happens,
+    // re-fetch from the canonical actor URL in `actor.id`.
+    if actor.inbox.is_none() && actor.id != url {
+        tracing::debug!(
+            "key URL {url} returned partial actor (no inbox); re-fetching canonical actor {}",
+            actor.id
+        );
+        actor = fetch_ap_object(
+            &actor.id.clone(),
+            &state.http,
+            &state.key.private_key,
+            &state.config.key_id(),
+        )
+        .await?;
+    }
 
     // 4. Persist to DB
     upsert_actor_cache(state, &actor).await?;
@@ -271,8 +274,8 @@ pub async fn upsert_actor_cache(state: &AppState, actor: &RemoteActor) -> AppRes
 
 /// Reject URLs that point to local/private network addresses.
 pub(crate) fn validate_url(url: &str) -> AppResult<()> {
-    let parsed = Url::parse(url)
-        .map_err(|e| AppError::BadRequest(format!("invalid URL '{url}': {e}")))?;
+    let parsed =
+        Url::parse(url).map_err(|e| AppError::BadRequest(format!("invalid URL '{url}': {e}")))?;
 
     match parsed.scheme() {
         "https" | "http" => {}
@@ -284,9 +287,7 @@ pub(crate) fn validate_url(url: &str) -> AppResult<()> {
         None => return Err(AppError::BadRequest("URL has no host".into())),
         Some(url::Host::Domain(h)) => {
             if h == "localhost" || h == "ip6-localhost" {
-                return Err(AppError::BadRequest(format!(
-                    "SSRF: disallowed host '{h}'"
-                )));
+                return Err(AppError::BadRequest(format!("SSRF: disallowed host '{h}'")));
             }
         }
         Some(url::Host::Ipv4(ip)) => {

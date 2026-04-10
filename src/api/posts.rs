@@ -22,9 +22,9 @@ use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
-use subtle::ConstantTimeEq;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 // ── Request / Response ────────────────────────────────────────────────────────
 
@@ -67,7 +67,12 @@ pub async fn sync_posts(
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     Json(body): Json<SyncRequest>,
 ) -> AppResult<Json<SyncResponse>> {
-    if !bool::from(bearer.token().as_bytes().ct_eq(state.config.admin.token.as_bytes())) {
+    if !bool::from(
+        bearer
+            .token()
+            .as_bytes()
+            .ct_eq(state.config.admin.token.as_bytes()),
+    ) {
         return Err(AppError::Unauthorized("invalid admin token".into()));
     }
 
@@ -107,7 +112,16 @@ pub async fn sync_posts(
         }
 
         // Snapshot existing record before upsert
-        let existing = sqlx::query_as::<_, (Option<String>, String, String, Option<String>, DateTime<Utc>)>(
+        let existing = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+                DateTime<Utc>,
+            ),
+        >(
             "SELECT title, url, content, ap_note_id, registered_at FROM posts WHERE id = $1",
         )
         .bind(&post.id)
@@ -161,9 +175,7 @@ pub async fn sync_posts(
                         url: post.url,
                         content: post.content,
                         note_id,
-                        registered_at: registered_at
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string(),
+                        registered_at: registered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                     }
                 } else {
                     Action::NoOp
@@ -186,17 +198,20 @@ pub async fn sync_posts(
         .await?
         .rows_affected() as usize
     } else {
-        sqlx::query(
-            "UPDATE posts SET active = FALSE, updated_at = NOW() WHERE active = TRUE",
-        )
-        .execute(&state.db)
-        .await?
-        .rows_affected() as usize
+        sqlx::query("UPDATE posts SET active = FALSE, updated_at = NOW() WHERE active = TRUE")
+            .execute(&state.db)
+            .await?
+            .rows_affected() as usize
     };
 
     for action in actions {
         match action {
-            Action::Publish { id, title, url, content } => {
+            Action::Publish {
+                id,
+                title,
+                url,
+                content,
+            } => {
                 published += 1;
                 let s = state.clone();
                 tokio::spawn(async move {
@@ -206,11 +221,27 @@ pub async fn sync_posts(
                     }
                 });
             }
-            Action::Update { id, title, url, content, note_id, registered_at } => {
+            Action::Update {
+                id,
+                title,
+                url,
+                content,
+                note_id,
+                registered_at,
+            } => {
                 updated += 1;
                 let s = state.clone();
                 tokio::spawn(async move {
-                    match update_post_note(&s, &note_id, title.as_deref(), &url, &content, &registered_at).await {
+                    match update_post_note(
+                        &s,
+                        &note_id,
+                        title.as_deref(),
+                        &url,
+                        &content,
+                        &registered_at,
+                    )
+                    .await
+                    {
                         Ok(()) => tracing::info!("sent Update(Note) for '{id}'"),
                         Err(e) => tracing::error!("update failed for '{id}': {e}"),
                     }
@@ -220,6 +251,11 @@ pub async fn sync_posts(
         }
     }
 
-    Ok(Json(SyncResponse { upserted, published, updated, deactivated, rejected }))
+    Ok(Json(SyncResponse {
+        upserted,
+        published,
+        updated,
+        deactivated,
+        rejected,
+    }))
 }
-

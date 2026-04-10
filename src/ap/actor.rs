@@ -96,7 +96,7 @@ pub async fn actor_handler(
     let doc = ActorDocument {
         context: actor_context(),
         id: actor_url.clone(),
-        actor_type: "Service",  // bot/service account
+        actor_type: "Service", // bot/service account
         preferred_username: state.config.instance.username.clone(),
         name: state.config.instance.display_name.clone(),
         summary: state.config.instance.summary.clone(),
@@ -147,12 +147,11 @@ pub async fn outbox_handler(State(state): State<AppState>) -> impl IntoResponse 
 
 pub async fn followers_handler(State(state): State<AppState>) -> impl IntoResponse {
     let base = state.config.base_url();
-    let count: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM followers WHERE accepted = TRUE",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    let count: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM followers WHERE accepted = TRUE")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -206,7 +205,7 @@ pub async fn note_handler(
 
     let base = state.config.base_url();
     let published_str = registered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let updated_str   = updated_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let updated_str = updated_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     use crate::ap::publish::render_note_html;
     let content_html = render_note_html(title.as_deref(), &url, &content_md);
@@ -232,7 +231,10 @@ pub async fn note_handler(
 
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/activity+json; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/activity+json; charset=utf-8",
+        )],
         Json(note),
     )
         .into_response())

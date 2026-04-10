@@ -4,8 +4,23 @@
 //! perform full JSON-LD expansion. We deserialize using compacted key names
 //! directly. Unknown fields are captured in `extra` where needed.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// Deserialize a JSON value that can be either a single item or an array.
+/// Some AP implementations (e.g. GTS 0.20) send a single object instead of
+/// a one-element array for fields like `tag` and `attachment`.
+fn deserialize_one_or_many<'de, D>(d: D) -> Result<Option<Vec<Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<Value> = Option::deserialize(d)?;
+    match v {
+        None => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(a)),
+        Some(single) => Ok(Some(vec![single])),
+    }
+}
 
 // ── @context helpers ─────────────────────────────────────────────────────────
 
@@ -112,7 +127,7 @@ pub struct Note {
     pub id: String,
 
     #[serde(rename = "type")]
-    pub note_type: String,   // "Note", "Article", etc.
+    pub note_type: String, // "Note", "Article", etc.
 
     #[serde(rename = "attributedTo")]
     pub attributed_to: Option<StringOrObject>,
@@ -138,12 +153,14 @@ pub struct Note {
     pub published: Option<String>,
 
     pub sensitive: Option<bool>,
-    pub summary: Option<String>,  // content warning / subject line
+    pub summary: Option<String>, // content warning / subject line
 
     /// Hashtag / Mention tags
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub tag: Option<Vec<Value>>,
 
     /// Attached media
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub attachment: Option<Vec<Value>>,
 }
 
@@ -200,7 +217,7 @@ pub struct RemoteActor {
     pub id: String,
 
     #[serde(rename = "type")]
-    pub actor_type: String,  // Person, Service, Application, Group, Organization
+    pub actor_type: String, // Person, Service, Application, Group, Organization
 
     #[serde(rename = "preferredUsername")]
     pub preferred_username: Option<String>,
@@ -215,8 +232,8 @@ pub struct RemoteActor {
     #[serde(rename = "publicKey")]
     pub public_key: Option<PublicKeyObject>,
 
-    pub icon: Option<Value>,   // avatar
-    pub image: Option<Value>,  // header/banner image
+    pub icon: Option<Value>,  // avatar
+    pub image: Option<Value>, // header/banner image
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -358,7 +375,9 @@ mod tests {
     #[test]
     fn not_public_when_missing() {
         assert!(!is_public(&None, &None));
-        let to = Some(StringOrArray::Single("https://example.com/users/bob".into()));
+        let to = Some(StringOrArray::Single(
+            "https://example.com/users/bob".into(),
+        ));
         assert!(!is_public(&to, &None));
     }
 
@@ -386,10 +405,7 @@ mod tests {
         assert_eq!(note.best_content(), Some("<p>Hello, world!</p>"));
         assert!(note.is_public());
         assert!(!note.sensitive.unwrap_or(false));
-        assert_eq!(
-            note.display_url(),
-            "https://mastodon.social/@alice/1234"
-        );
+        assert_eq!(note.display_url(), "https://mastodon.social/@alice/1234");
     }
 
     const GOTOSOCIAL_NOTE: &str = r#"{
@@ -457,7 +473,10 @@ mod tests {
         assert_eq!(actor.id, "https://mastodon.social/users/alice");
         assert_eq!(actor.actor_type, "Person");
         assert_eq!(actor.preferred_username.as_deref(), Some("alice"));
-        assert_eq!(actor.inbox.as_deref(), Some("https://mastodon.social/users/alice/inbox"));
+        assert_eq!(
+            actor.inbox.as_deref(),
+            Some("https://mastodon.social/users/alice/inbox")
+        );
         assert_eq!(
             actor.preferred_inbox(),
             Some("https://mastodon.social/inbox")
@@ -484,8 +503,14 @@ mod tests {
 
         let activity: IncomingActivity = serde_json::from_str(json).unwrap();
         assert_eq!(activity.activity_type, "Follow");
-        assert_eq!(activity.actor.id(), Some("https://remote.example/users/alice"));
-        assert_eq!(activity.id.as_deref(), Some("https://remote.example/follows/1"));
+        assert_eq!(
+            activity.actor.id(),
+            Some("https://remote.example/users/alice")
+        );
+        assert_eq!(
+            activity.id.as_deref(),
+            Some("https://remote.example/follows/1")
+        );
     }
 
     #[test]

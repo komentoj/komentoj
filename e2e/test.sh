@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# E2E federation test: komentoj ↔ GoToSocial
+# E2E federation test: komentoj ↔ GoToSocial (HTTPS)
 #
-# Requires the docker-compose.e2e.yml stack to be running:
+# Prerequisites:
+#   ./e2e/setup.sh           # generate mkcert certs + /etc/hosts entries
 #   docker compose -f docker-compose.e2e.yml up -d
 #
 # Run from the repository root:
@@ -9,8 +10,8 @@
 
 set -euo pipefail
 
-KOMENTOJ="http://localhost:8080"
-GTS="http://localhost:8888"
+KOMENTOJ="https://komentoj.local"
+GTS="https://gotosocial.local:8888"
 ADMIN_TOKEN="e2e-test-admin-token"
 GTS_USER="testuser"
 GTS_PASSWORD="Password1!"
@@ -19,6 +20,23 @@ GTS_EMAIL="testuser@example.com"
 PASS=0
 FAIL=0
 _fail_msgs=()
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CACERT="$SCRIPT_DIR/certs/rootCA.pem"
+
+# Route *.local domains to localhost without touching /etc/hosts.
+# All curl calls in this script go through this wrapper automatically.
+curl() {
+    command curl \
+        --resolve "komentoj.local:443:127.0.0.1" \
+        --resolve "gotosocial.local:443:127.0.0.1" \
+        --resolve "gotosocial.local:8888:127.0.0.1" \
+        --cacert "$CACERT" \
+        "$@"
+}
+
+COOKIE_JAR=$(mktemp)
+trap 'rm -f "$COOKIE_JAR"' EXIT
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,37 +85,77 @@ section() { echo; echo "── $* ───────────────�
 section "0. Services healthy"
 
 wait_for "komentoj reachable" 120 \
-    'curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:komentoj@komentoj.local:8080"'
+    'curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:komentoj@komentoj.local"'
 
-wait_for "GoToSocial reachable" 120 \
+wait_for "GoToSocial reachable" 300 \
     'curl -sf "$GTS/api/v1/instance"'
 
-# ── 1. GTS account + OAuth token ────────────────────────────────────────────
+# ── 1. GTS account + OAuth token ─────────────────────────────────────────────
 
 section "1. GTS account setup"
 
-SIGNUP=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "$GTS/api/v1/accounts" \
-    -F "username=$GTS_USER" -F "password=$GTS_PASSWORD" \
-    -F "email=$GTS_EMAIL" -F "agreement=true" -F "locale=en")
-if [[ "$SIGNUP" == "200" || "$SIGNUP" == "422" ]]; then
-    ok "GTS account exists (HTTP $SIGNUP)"
-else
-    fail "GTS account signup — HTTP $SIGNUP"
-fi
+# Create + confirm account via GTS CLI (direct DB access, no HTTP needed).
+# The CLI exits 0 even if the account already exists.
+GTS_CONTAINER=$(docker compose -f docker-compose.e2e.yml ps -q gotosocial)
+docker exec "$GTS_CONTAINER" \
+    /gotosocial/gotosocial --config-path "" admin account create \
+    --username "$GTS_USER" --email "$GTS_EMAIL" --password "$GTS_PASSWORD" \
+    2>&1 | grep -v "^time=" || true
+docker exec "$GTS_CONTAINER" \
+    /gotosocial/gotosocial --config-path "" admin account confirm \
+    --username "$GTS_USER" \
+    2>&1 | grep -v "^time=" || true
+ok "GTS account created/confirmed"
 
+# Register OAuth app (callback URL will receive the auth code via redirect)
 APP=$(curl -sf -X POST "$GTS/api/v1/apps" \
     -F "client_name=e2e-test" \
-    -F "redirect_uris=urn:ietf:wg:oauth:2.0:oob" \
+    -F "redirect_uris=http://localhost:1/cb" \
     -F "scopes=read write")
-CLIENT_ID=$(echo "$APP" | grep -oP '"client_id":"\K[^"]+')
+CLIENT_ID=$(echo "$APP"    | grep -oP '"client_id":"\K[^"]+')
 CLIENT_SECRET=$(echo "$APP" | grep -oP '"client_secret":"\K[^"]+')
 
-AUTH=$(curl -sf -X POST "$GTS/oauth/token" \
-    -F "client_id=$CLIENT_ID" -F "client_secret=$CLIENT_SECRET" \
-    -F "grant_type=password" -F "username=$GTS_EMAIL" \
-    -F "password=$GTS_PASSWORD" -F "scope=read write")
-GTS_TOKEN=$(echo "$AUTH" | grep -oP '"access_token":"\K[^"]+')
+# ── Headless authorization_code OAuth flow ───────────────────────────────────
+#
+# GTS 0.17 has no CSRF tokens on either the sign-in or authorize forms.
+# The key is to GET /oauth/authorize FIRST so GTS stores the OAuth state in
+# the session, then sign in, then POST the grant (empty body).
+#
+# 1. GET /oauth/authorize → GTS 303s to /auth/sign_in, stores state in cookie
+# 2. POST /auth/sign_in → GTS 302s back to /oauth/authorize
+# 3. GET /oauth/authorize (authenticated) → grant form
+# 4. POST /oauth/authorize (empty body) → 302 to callback?code=XXX
+# 5. Exchange code for access token
+
+OAUTH_AUTH_URL="$GTS/oauth/authorize?response_type=code&client_id=${CLIENT_ID}&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&scope=read+write"
+
+# Step 1: prime session with OAuth state
+curl -s -c "$COOKIE_JAR" -b "$COOKIE_JAR" "$OAUTH_AUTH_URL" -o /dev/null
+
+# Step 2: sign in
+curl -s -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    -X POST "$GTS/auth/sign_in" \
+    --data-urlencode "username=$GTS_EMAIL" \
+    --data-urlencode "password=$GTS_PASSWORD" \
+    -o /dev/null
+
+# Step 3+4: GET authorize page (confirmation), then POST empty grant
+curl -sf -c "$COOKIE_JAR" -b "$COOKIE_JAR" "$OAUTH_AUTH_URL" -o /dev/null
+
+# POST /oauth/authorize — GTS redirects to callback?code=XXX
+AUTH_RESP=$(curl -s -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    -X POST "$GTS/oauth/authorize" \
+    -D - -o /dev/null --max-redirs 0 2>&1 || true)
+AUTH_CODE=$(echo "$AUTH_RESP" | grep -i 'location:' | grep -oP 'code=\K[^\s&]+')
+
+TOKEN_RESP=$(curl -sf -X POST "$GTS/oauth/token" \
+    -F "client_id=$CLIENT_ID" \
+    -F "client_secret=$CLIENT_SECRET" \
+    -F "redirect_uri=http://localhost:1/cb" \
+    -F "grant_type=authorization_code" \
+    -F "code=$AUTH_CODE" \
+    -F "scope=read write")
+GTS_TOKEN=$(echo "$TOKEN_RESP" | grep -oP '"access_token":"\K[^"]+' || true)
 
 if [[ -n "$GTS_TOKEN" ]]; then ok "GTS OAuth token obtained"
 else fail "GTS OAuth token not obtained — aborting"; exit 1; fi
@@ -106,12 +164,12 @@ else fail "GTS OAuth token not obtained — aborting"; exit 1; fi
 
 section "2. WebFinger"
 
-WF_K=$(curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:komentoj@komentoj.local:8080")
-assert_contains "komentoj WF subject" "$WF_K" "acct:komentoj@komentoj.local"
-assert_contains "komentoj WF actor link" "$WF_K" "http://komentoj.local:8080/actor"
+WF_K=$(curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:komentoj@komentoj.local")
+assert_contains "komentoj WF subject"           "$WF_K" "acct:komentoj@komentoj.local"
+assert_contains "komentoj WF actor link"        "$WF_K" "https://komentoj.local/actor"
 assert_contains "komentoj WF content-type link" "$WF_K" "application/activity+json"
 
-WF_GTS=$(curl -sf "$GTS/.well-known/webfinger?resource=acct:$GTS_USER@gotosocial.local:8888")
+WF_GTS=$(curl -sf "$GTS/.well-known/webfinger?resource=acct:$GTS_USER@gotosocial.local")
 assert_contains "GTS WF subject" "$WF_GTS" "acct:$GTS_USER@gotosocial.local"
 
 # ── 3. Actor documents ───────────────────────────────────────────────────────
@@ -119,17 +177,20 @@ assert_contains "GTS WF subject" "$WF_GTS" "acct:$GTS_USER@gotosocial.local"
 section "3. Actor documents"
 
 ACTOR=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/actor")
-assert_contains "komentoj actor type=Service"   "$ACTOR" '"type":"Service"'
-assert_contains "komentoj actor inbox"          "$ACTOR" '"inbox":"http://komentoj.local:8080/inbox"'
-assert_contains "komentoj actor publicKey"      "$ACTOR" '"publicKey"'
-assert_contains "komentoj actor followers"      "$ACTOR" '"followers"'
+assert_contains "komentoj actor type=Service"  "$ACTOR" '"type":"Service"'
+assert_contains "komentoj actor inbox"         "$ACTOR" '"inbox":"https://komentoj.local/inbox"'
+assert_contains "komentoj actor publicKey"     "$ACTOR" '"publicKey"'
+assert_contains "komentoj actor followers"     "$ACTOR" '"followers"'
 
-assert_http "komentoj outbox OK"   200 -H "Accept: application/activity+json" "$KOMENTOJ/outbox"
+assert_http "komentoj outbox OK"    200 -H "Accept: application/activity+json" "$KOMENTOJ/outbox"
 assert_http "komentoj followers OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/followers"
 assert_http "komentoj following OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/following"
 
-GTS_ACTOR=$(curl -sf -H "Accept: application/activity+json" "$GTS/users/$GTS_USER")
-assert_contains "GTS actor has inbox" "$GTS_ACTOR" '"inbox"'
+# GTS 0.17+ requires HTTP signatures for /users/:id (ActivityPub endpoint).
+# Use the Mastodon-compatible API instead to verify the account exists.
+GTS_ACCOUNT=$(curl -sf -H "Authorization: Bearer $GTS_TOKEN" \
+    "$GTS/api/v1/accounts/lookup?acct=$GTS_USER@gotosocial.local")
+assert_contains "GTS account exists" "$GTS_ACCOUNT" '"acct"'
 
 # ── 4. Browser redirect (actor serves HTML redirect) ────────────────────────
 
@@ -144,7 +205,7 @@ else fail "actor browser redirect — got HTTP $REDIR, want 303"; fi
 section "5. POST /api/v1/posts/sync — new post → Create(Note)"
 
 POST_ID="e2e-post-$(date +%s)"
-POST_URL="http://gotosocial.local:8888/posts/$POST_ID"
+POST_URL="https://gotosocial.local/posts/$POST_ID"
 
 SYNC1=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -159,18 +220,35 @@ assert_contains "sync: updated=0"   "$SYNC1" '"updated":0'
 wait_for "ap_note_id persisted in DB" 30 \
     'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qF "total"'
 
-# Retrieve the note ID from comments endpoint (total=0 but post must exist)
 COMMENTS0=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
 assert_contains "comments post_id matches" "$COMMENTS0" "\"post_id\":\"$POST_ID\""
 
 # ── 6. Resolve komentoj actor from GTS side ──────────────────────────────────
+#
+# GTS Mastodon API search doesn't surface Service-type actors even with resolve=true.
+# Trigger resolution via a mention: GTS fetches the mentioned actor's WebFinger+actor
+# document, which causes it to store komentoj as a remote account. We then query the
+# GTS database directly to get the internal ID (needed for the Follow API in §7).
 
 section "6. GTS resolves komentoj actor"
 
-GTS_SEARCH=$(curl -sf \
-    "$GTS/api/v1/accounts/search?q=komentoj@komentoj.local:8080&resolve=true" \
-    -H "Authorization: Bearer $GTS_TOKEN")
-KOMENTOJ_GTS_ID=$(echo "$GTS_SEARCH" | grep -oP '"id":"\K[^"]+' | head -1)
+# Trigger resolution via mention
+curl -s -X POST "$GTS/api/v1/statuses" \
+    -H "Authorization: Bearer $GTS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"status\":\"test @komentoj@komentoj.local\",\"visibility\":\"public\"}" \
+    -o /dev/null
+
+# Wait for GTS to process the mention and store the remote account
+wait_for "komentoj actor stored in GTS DB" 30 \
+    'docker compose -f docker-compose.e2e.yml exec -T gts-postgres psql -U gotosocial -t \
+     -c "SELECT id FROM accounts WHERE username='"'"'komentoj'"'"' AND domain='"'"'komentoj.local'"'"';" \
+     | grep -qE "[0-9A-Z]"'
+
+KOMENTOJ_GTS_ID=$(docker compose -f docker-compose.e2e.yml exec -T gts-postgres \
+    psql -U gotosocial -t \
+    -c "SELECT id FROM accounts WHERE username='komentoj' AND domain='komentoj.local';" \
+    | tr -d ' \n')
 
 if [[ -n "$KOMENTOJ_GTS_ID" ]]; then ok "komentoj resolved in GTS (id=$KOMENTOJ_GTS_ID)"
 else fail "could not resolve komentoj actor in GTS"; KOMENTOJ_GTS_ID=""; fi
@@ -184,14 +262,12 @@ if [[ -n "$KOMENTOJ_GTS_ID" ]]; then
         -H "Authorization: Bearer $GTS_TOKEN" > /dev/null
     ok "GTS sent Follow activity"
 
-    # komentoj records follower, delivers Accept, GTS records relationship
     wait_for "komentoj followers count ≥ 1" 30 \
         'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers" | grep -P "\"totalItems\":[1-9]"'
 
     FOLLOWERS=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers")
     assert_contains "followers totalItems ≥ 1" "$FOLLOWERS" '"totalItems"'
 
-    # GTS should now consider komentoj as followed
     wait_for "GTS sees relationship as following" 30 \
         'curl -sf "$GTS/api/v1/accounts/relationships?id=$KOMENTOJ_GTS_ID" \
              -H "Authorization: Bearer $GTS_TOKEN" | grep -qF "\"following\":true"'
@@ -203,23 +279,23 @@ fi
 
 section "8. Incoming Create(Note) from GTS"
 
+# Mention @komentoj@komentoj.local so GTS delivers the status to komentoj's inbox.
+# The POST_URL in the text lets komentoj associate the comment with the right post.
 GTS_STATUS=$(curl -sf -X POST "$GTS/api/v1/statuses" \
     -H "Authorization: Bearer $GTS_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"status\":\"E2E comment on $POST_URL\",\"visibility\":\"public\"}")
-GTS_STATUS_ID=$(echo "$GTS_STATUS" | grep -oP '"id":"\K[^"]+' | head -1)
+    -d "{\"status\":\"E2E comment on $POST_URL @komentoj@komentoj.local\",\"visibility\":\"public\"}")
+GTS_STATUS_ID=$(echo "$GTS_STATUS" | grep -oP '"id":"\K[^"]+' | head -1 || true)
 
 if [[ -n "$GTS_STATUS_ID" ]]; then
     ok "GTS status posted (id=$GTS_STATUS_ID)"
 
-    # komentoj should deliver the Note to its inbox and store a comment
-    # GTS delivers the Create to komentoj's inbox automatically (as a follower post)
     wait_for "comment stored in komentoj" 30 \
         'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qP "\"total\":[1-9]"'
 
     COMMENTS1=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
-    assert_contains "comment has author field" "$COMMENTS1" '"author"'
-    assert_contains "comment has content_html"  "$COMMENTS1" '"content_html"'
+    assert_contains "comment has author field"   "$COMMENTS1" '"author"'
+    assert_contains "comment has content_html"   "$COMMENTS1" '"content_html"'
     assert_contains "comments has replies field" "$COMMENTS1" '"replies"'
 else
     fail "GTS status post failed: $GTS_STATUS"
@@ -234,29 +310,24 @@ SYNC2=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
     -H "Content-Type: application/json" \
     -d "{\"posts\":[{\"id\":\"$POST_ID\",\"title\":\"E2E Test Post (updated)\",\"url\":\"$POST_URL\",\"content\":\"Updated content.\"}]}")
 
-assert_contains "update sync: upserted=1" "$SYNC2" '"upserted":1'
-assert_contains "update sync: updated=1"  "$SYNC2" '"updated":1'
+assert_contains "update sync: upserted=1"  "$SYNC2" '"upserted":1'
+assert_contains "update sync: updated=1"   "$SYNC2" '"updated":1'
 assert_contains "update sync: published=0" "$SYNC2" '"published":0'
 
 # ── 10. Note document fetchable ───────────────────────────────────────────────
 
-section "10. GET /notes/:id"
+section "10. GET /notes/{id}"
 
-# Derive note ID from the DB via comments API (comments store the Note ID)
-# (post must exist and ap_note_id must be set by now — checked in step 5)
-# We verify the note endpoint returns a valid Note object
 NOTE_RESP=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
-NOTE_ID_FROM_COMMENTS=$(echo "$NOTE_RESP" | grep -oP '"id":"http://komentoj\.local:8080/notes/\K[^"]+' | head -1)
+NOTE_ID_FROM_COMMENTS=$(echo "$NOTE_RESP" | grep -oP '"id":"https://komentoj\.local/notes/\K[^"]+' | head -1 || true)
 
 if [[ -n "$NOTE_ID_FROM_COMMENTS" ]]; then
     NOTE_DOC=$(curl -sf -H "Accept: application/activity+json" \
-        "http://localhost:8080/notes/$NOTE_ID_FROM_COMMENTS" || true)
-    assert_contains "Note doc type=Note"       "$NOTE_DOC" '"type":"Note"'
-    assert_contains "Note doc attributedTo"    "$NOTE_DOC" '"attributedTo"'
-    assert_contains "Note doc content"         "$NOTE_DOC" '"content"'
+        "$KOMENTOJ/notes/$NOTE_ID_FROM_COMMENTS" || true)
+    assert_contains "Note doc type=Note"    "$NOTE_DOC" '"type":"Note"'
+    assert_contains "Note doc attributedTo" "$NOTE_DOC" '"attributedTo"'
+    assert_contains "Note doc content"      "$NOTE_DOC" '"content"'
 else
-    # No comments yet — derive from sync response instead
-    # (note_id not exposed by comments API directly; skip sub-check)
     ok "Note fetch skipped — no comments with komentoj note IDs yet"
 fi
 
@@ -269,12 +340,10 @@ SYNC3=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
     -H "Content-Type: application/json" \
     -d '{"posts":[]}')
 
-# deactivated count should be ≥ 1 (our test post)
-DEACT=$(echo "$SYNC3" | grep -oP '"deactivated":\K[0-9]+')
+DEACT=$(echo "$SYNC3" | grep -oP '"deactivated":\K[0-9]+' || true)
 if (( DEACT >= 1 )); then ok "deactivated ≥ 1 posts ($DEACT)"
 else fail "expected deactivated ≥ 1, got $DEACT — sync response: $SYNC3"; fi
 
-# Comments on deactivated post still readable (soft delete)
 assert_http "comments still readable after deactivation" 200 \
     "$KOMENTOJ/api/v1/comments?id=$POST_ID"
 
@@ -286,10 +355,10 @@ if [[ -n "$GTS_STATUS_ID" ]]; then
     UPD=$(curl -sf -X PUT "$GTS/api/v1/statuses/$GTS_STATUS_ID" \
         -H "Authorization: Bearer $GTS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"status":"Updated E2E comment"}')
+        -d "{\"status\":\"Updated E2E comment on $POST_URL @komentoj@komentoj.local\"}")
     if echo "$UPD" | grep -qF '"id"'; then
         ok "GTS status updated"
-        sleep 3  # allow delivery
+        sleep 3
     else
         fail "GTS status update failed: $UPD"
     fi
@@ -300,12 +369,12 @@ fi
 section "13. Incoming Delete(Note) from GTS"
 
 if [[ -n "$GTS_STATUS_ID" ]]; then
-    DEL=$(curl -sf -X DELETE "$GTS/api/v1/statuses/$GTS_STATUS_ID" \
-        -H "Authorization: Bearer $GTS_TOKEN" || true)
+    curl -sf -X DELETE "$GTS/api/v1/statuses/$GTS_STATUS_ID" \
+        -H "Authorization: Bearer $GTS_TOKEN" > /dev/null || true
     ok "GTS status deleted (Delete activity sent to komentoj)"
-    sleep 3  # allow delivery
+    sleep 3
 
-    wait_for "comment soft-deleted in komentoj" 20 \
+    wait_for "comment soft-deleted in komentoj" 30 \
         'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qP "\"total\":0"'
 fi
 

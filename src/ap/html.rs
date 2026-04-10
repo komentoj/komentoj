@@ -32,20 +32,47 @@ fn strip_html(html: &str) -> String {
 fn allowed_tags() -> HashSet<&'static str> {
     [
         // Block-level
-        "p", "br", "blockquote", "pre", "code",
+        "p",
+        "br",
+        "blockquote",
+        "pre",
+        "code",
         // Inline formatting
-        "strong", "em", "b", "i", "u", "s", "del", "ins", "strike",
-        "sub", "sup", "mark", "small",
+        "strong",
+        "em",
+        "b",
+        "i",
+        "u",
+        "s",
+        "del",
+        "ins",
+        "strike",
+        "sub",
+        "sup",
+        "mark",
+        "small",
         // Links
         "a",
         // Headings (rendered from Markdown)
-        "h1", "h2", "h3", "h4", "h5", "h6",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
         // Lists
-        "ul", "ol", "li",
+        "ul",
+        "ol",
+        "li",
         // Spans (needed for Mastodon mention/hashtag h-card)
         "span",
         // Tables (rendered from Markdown)
-        "table", "thead", "tbody", "tr", "th", "td",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
     ]
     .into()
 }

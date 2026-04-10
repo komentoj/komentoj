@@ -19,9 +19,7 @@ use crate::error::{AppError, AppResult};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{DateTime, Utc};
 use rsa::{
-    pkcs1::DecodeRsaPublicKey,
-    pkcs8::DecodePublicKey,
-    Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
+    pkcs1::DecodeRsaPublicKey, pkcs8::DecodePublicKey, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::HashMap;
@@ -42,9 +40,9 @@ pub struct SignedRequestHeaders {
 ///
 /// `body` should be `None` for GET requests, `Some(body_bytes)` for POST.
 pub fn sign_request(
-    method: &str,           // "get" | "post" (lowercase)
-    path: &str,             // e.g. "/users/alice/inbox"
-    host: &str,             // e.g. "example.com"
+    method: &str, // "get" | "post" (lowercase)
+    path: &str,   // e.g. "/users/alice/inbox"
+    host: &str,   // e.g. "example.com"
     body: Option<&[u8]>,
     private_key: &RsaPrivateKey,
     key_id: &str,
@@ -120,9 +118,7 @@ pub fn verify_request(
     //    also checked as defence-in-depth when the Date header is present but unsigned.
     if parsed.signed_headers.contains(&"date".to_string()) {
         let date_str = request_headers.get("date").ok_or_else(|| {
-            AppError::Unauthorized(
-                "Signature lists 'date' but the Date header is absent".into(),
-            )
+            AppError::Unauthorized("Signature lists 'date' but the Date header is absent".into())
         })?;
         check_date_freshness(date_str)?;
     } else if let Some(date_str) = request_headers.get("date") {
@@ -136,7 +132,9 @@ pub fn verify_request(
         .any(|h| h == "digest" || h == "content-digest");
     if digest_in_sig {
         verify_body_digest(request_headers, body)?;
-    } else if request_headers.contains_key("digest") || request_headers.contains_key("content-digest") {
+    } else if request_headers.contains_key("digest")
+        || request_headers.contains_key("content-digest")
+    {
         // Digest present but not listed in Signature: still verify as defense-in-depth.
         let _ = verify_body_digest(request_headers, body);
     }
@@ -202,12 +200,10 @@ fn parse_signature_header(value: &str) -> AppResult<ParsedSignature> {
         }
     }
 
-    let key_id = key_id.ok_or_else(|| {
-        AppError::Unauthorized("Signature header missing keyId".into())
-    })?;
-    let sig_b64 = signature.ok_or_else(|| {
-        AppError::Unauthorized("Signature header missing signature".into())
-    })?;
+    let key_id =
+        key_id.ok_or_else(|| AppError::Unauthorized("Signature header missing keyId".into()))?;
+    let sig_b64 = signature
+        .ok_or_else(|| AppError::Unauthorized("Signature header missing signature".into()))?;
     let signature_bytes = B64
         .decode(&sig_b64)
         .map_err(|_| AppError::Unauthorized("invalid base64 in signature".into()))?;
@@ -254,10 +250,7 @@ fn split_signature_params(value: &str) -> Vec<String> {
 
 // ── Digest verification ───────────────────────────────────────────────────────
 
-fn verify_body_digest(
-    headers: &HashMap<String, String>,
-    body: &[u8],
-) -> AppResult<()> {
+fn verify_body_digest(headers: &HashMap<String, String>, body: &[u8]) -> AppResult<()> {
     let actual_hash = Sha256::digest(body);
 
     // Try RFC 3230 `Digest: SHA-256=<base64>` first (most common)
@@ -356,11 +349,7 @@ fn rsa_sha256_sign(message: &str, key: &RsaPrivateKey) -> AppResult<Vec<u8>> {
         .map_err(|e| AppError::Crypto(format!("signing failed: {e}")))
 }
 
-fn rsa_sha256_verify(
-    message: &str,
-    signature: &[u8],
-    key: &RsaPublicKey,
-) -> AppResult<()> {
+fn rsa_sha256_verify(message: &str, signature: &[u8], key: &RsaPublicKey) -> AppResult<()> {
     let hash = Sha256::digest(message.as_bytes());
     key.verify(Pkcs1v15Sign::new::<Sha256>(), &hash, signature)
         .map_err(|e| AppError::Crypto(format!("signature invalid: {e}")))
@@ -393,10 +382,15 @@ pub fn compute_digest(body: &[u8]) -> String {
 /// Extract the `keyId` from a raw Signature header string, stripping the
 /// `#…` fragment to obtain the actor URL.
 pub fn key_id_to_actor_url(key_id: &str) -> String {
-    match key_id.rfind('#') {
-        Some(idx) => key_id[..idx].to_string(),
-        None => key_id.to_string(),
+    // Mastodon-style: https://example.com/users/alice#main-key → strip fragment
+    if let Some(idx) = key_id.rfind('#') {
+        return key_id[..idx].to_string();
     }
+    // GoToSocial-style: https://example.com/users/alice/main-key → strip path suffix
+    if let Some(base) = key_id.strip_suffix("/main-key") {
+        return base.to_string();
+    }
+    key_id.to_string()
 }
 
 #[cfg(test)]
@@ -428,8 +422,14 @@ mod tests {
 
     #[test]
     fn key_id_to_actor_url_strips_fragment() {
+        // Mastodon-style fragment key ID
         assert_eq!(
             key_id_to_actor_url("https://example.com/users/alice#main-key"),
+            "https://example.com/users/alice"
+        );
+        // GoToSocial-style path-based key ID
+        assert_eq!(
+            key_id_to_actor_url("https://example.com/users/alice/main-key"),
             "https://example.com/users/alice"
         );
         assert_eq!(
@@ -441,7 +441,11 @@ mod tests {
     // ── Sign + verify round-trip ──────────────────────────────────────────────
     // Uses the shared test RSA key to avoid generating a new key per test.
 
-    fn make_headers(sig: &SignedRequestHeaders, digest: &str, host: &str) -> HashMap<String, String> {
+    fn make_headers(
+        sig: &SignedRequestHeaders,
+        digest: &str,
+        host: &str,
+    ) -> HashMap<String, String> {
         let mut h = HashMap::new();
         h.insert("host".into(), host.into());
         h.insert("date".into(), sig.date.clone());
@@ -456,8 +460,15 @@ mod tests {
         let body = br#"{"type":"Follow","actor":"https://remote.example/users/alice"}"#;
         let key_id = "https://remote.example/users/alice#main-key";
 
-        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
-            .unwrap();
+        let sig = sign_request(
+            "post",
+            "/inbox",
+            "test.example",
+            Some(body),
+            &key.private_key,
+            key_id,
+        )
+        .unwrap();
         let digest = compute_digest(body);
 
         let headers = make_headers(&sig, &digest, "test.example");
@@ -469,8 +480,15 @@ mod tests {
         let key = crate::test_helpers::test_key();
         let key_id = "https://remote.example/actor#main-key";
 
-        let sig = sign_request("get", "/actor", "test.example", None, &key.private_key, key_id)
-            .unwrap();
+        let sig = sign_request(
+            "get",
+            "/actor",
+            "test.example",
+            None,
+            &key.private_key,
+            key_id,
+        )
+        .unwrap();
 
         let mut headers = HashMap::new();
         headers.insert("host".into(), "test.example".into());
@@ -488,8 +506,15 @@ mod tests {
         let tampered = b"tampered body";
         let key_id = "https://remote.example/actor#main-key";
 
-        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
-            .unwrap();
+        let sig = sign_request(
+            "post",
+            "/inbox",
+            "test.example",
+            Some(body),
+            &key.private_key,
+            key_id,
+        )
+        .unwrap();
         let digest = compute_digest(body); // digest of ORIGINAL
 
         let mut headers = make_headers(&sig, &digest, "test.example");
@@ -507,8 +532,15 @@ mod tests {
         let body = b"{}";
         let key_id = "https://remote.example/actor#main-key";
 
-        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
-            .unwrap();
+        let sig = sign_request(
+            "post",
+            "/inbox",
+            "test.example",
+            Some(body),
+            &key.private_key,
+            key_id,
+        )
+        .unwrap();
         let digest = compute_digest(body);
 
         let mut headers = make_headers(&sig, &digest, "test.example");
@@ -525,8 +557,15 @@ mod tests {
         let body = b"{}";
         let key_id = "https://remote.example/actor#main-key";
 
-        let sig = sign_request("post", "/inbox", "test.example", Some(body), &key.private_key, key_id)
-            .unwrap();
+        let sig = sign_request(
+            "post",
+            "/inbox",
+            "test.example",
+            Some(body),
+            &key.private_key,
+            key_id,
+        )
+        .unwrap();
         let digest = compute_digest(body);
 
         let mut headers = make_headers(&sig, &digest, "test.example");

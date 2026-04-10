@@ -49,11 +49,17 @@ impl IntoResponse for AppError {
             }
             AppError::Http(e) => {
                 tracing::error!("http client error: {e}");
-                (StatusCode::BAD_GATEWAY, "failed to fetch remote resource".into())
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "failed to fetch remote resource".into(),
+                )
             }
             AppError::Crypto(msg) => {
                 tracing::error!("crypto error: {msg}");
-                (StatusCode::UNAUTHORIZED, "signature verification failed".into())
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "signature verification failed".into(),
+                )
             }
             AppError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");

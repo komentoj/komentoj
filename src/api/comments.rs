@@ -75,12 +75,11 @@ pub async fn get_comments(
     }
 
     // Verify the post exists
-    let exists: bool = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)",
-    )
-    .bind(&post_id)
-    .fetch_one(&state.db)
-    .await?;
+    let exists: bool =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
+            .bind(&post_id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !exists {
         return Err(AppError::NotFound);
@@ -106,19 +105,22 @@ pub async fn get_comments(
     .await?;
 
     // Fetch all non-deleted comments in one query; nest in memory
-    let rows = sqlx::query_as::<_, (
-        String,              // c.id
-        String,              // c.content_html
-        Option<String>,      // c.content_source
-        DateTime<Utc>,       // c.published_at
-        Option<String>,      // c.in_reply_to
-        Option<serde_json::Value>, // c.raw_data
-        String,              // a.preferred_username
-        Option<String>,      // a.display_name
-        Option<String>,      // a.profile_url
-        Option<String>,      // a.avatar_url
-        String,              // a.instance
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,                    // c.id
+            String,                    // c.content_html
+            Option<String>,            // c.content_source
+            DateTime<Utc>,             // c.published_at
+            Option<String>,            // c.in_reply_to
+            Option<serde_json::Value>, // c.raw_data
+            String,                    // a.preferred_username
+            Option<String>,            // a.display_name
+            Option<String>,            // a.profile_url
+            Option<String>,            // a.avatar_url
+            String,                    // a.instance
+        ),
+    >(
         r#"
         SELECT
             c.id,
@@ -147,35 +149,46 @@ pub async fn get_comments(
 
     let ids: std::collections::HashSet<String> = rows.iter().map(|r| r.0.clone()).collect();
 
-    let mut flat: Vec<CommentItem> = rows.into_iter().map(|r| {
-        let source_url = r.5.as_ref()
-            .and_then(|v| v.get("url").or_else(|| v.get("id")).and_then(|u| u.as_str()))
-            .unwrap_or(&r.0)
-            .to_string();
+    let mut flat: Vec<CommentItem> = rows
+        .into_iter()
+        .map(|r| {
+            let source_url =
+                r.5.as_ref()
+                    .and_then(|v| {
+                        v.get("url")
+                            .or_else(|| v.get("id"))
+                            .and_then(|u| u.as_str())
+                    })
+                    .unwrap_or(&r.0)
+                    .to_string();
 
-        CommentItem {
-            id: r.0,
-            author: AuthorInfo {
-                name: r.7.clone().unwrap_or_else(|| r.6.clone()),
-                username: r.6,
-                profile_url: r.8,
-                avatar_url: r.9,
-                instance: r.10.clone(),
-            },
-            content_html: r.1,
-            content_source: r.2,
-            published_at: r.3,
-            in_reply_to: r.4,
-            source_url,
-            instance: r.10,
-            replies: vec![],
-        }
-    }).collect();
+            CommentItem {
+                id: r.0,
+                author: AuthorInfo {
+                    name: r.7.clone().unwrap_or_else(|| r.6.clone()),
+                    username: r.6,
+                    profile_url: r.8,
+                    avatar_url: r.9,
+                    instance: r.10.clone(),
+                },
+                content_html: r.1,
+                content_source: r.2,
+                published_at: r.3,
+                in_reply_to: r.4,
+                source_url,
+                instance: r.10,
+                replies: vec![],
+            }
+        })
+        .collect();
 
     // Partition top-level vs replies; attach replies one level deep
-    let (mut top_level, replies): (Vec<_>, Vec<_>) = flat
-        .drain(..)
-        .partition(|c| c.in_reply_to.as_ref().map(|p| !ids.contains(p)).unwrap_or(true));
+    let (mut top_level, replies): (Vec<_>, Vec<_>) = flat.drain(..).partition(|c| {
+        c.in_reply_to
+            .as_ref()
+            .map(|p| !ids.contains(p))
+            .unwrap_or(true)
+    });
 
     for reply in replies {
         let parent_id = reply.in_reply_to.as_deref().unwrap_or("");
@@ -187,7 +200,9 @@ pub async fn get_comments(
     }
 
     let next_cursor = if top_level.len() > limit as usize {
-        top_level.get(limit as usize - 1).map(|c| c.published_at.to_rfc3339())
+        top_level
+            .get(limit as usize - 1)
+            .map(|c| c.published_at.to_rfc3339())
     } else {
         None
     };

@@ -1,7 +1,10 @@
 # E2E federation test environment
 #
-# Runs komentoj + GoToSocial on an isolated Docker bridge network so they
-# can discover each other by hostname without TLS.
+# Caddy terminates TLS for both domains; GTS and komentoj communicate with
+# each other exclusively over HTTPS (via Caddy) just like in production.
+#
+# One-time local setup:
+#   ./e2e/setup.sh        # installs mkcert, generates certs, updates /etc/hosts
 #
 # Usage (local):
 #   docker compose -f docker-compose.e2e.yml up -d
@@ -9,7 +12,7 @@
 #   docker compose -f docker-compose.e2e.yml down -v
 #
 # In CI, set KOMENTOJ_IMAGE to a pre-built image tag to skip the build step:
-#   KOMENTOJ_IMAGE=komentoj:e2e docker compose -f docker-compose.e2e.yml up -d
+#   KOMENTOJ_IMAGE=komentoj:e2e docker compose -f docker-compose.e2e.yml up -d --no-build
 
 networks:
   fedi:
@@ -58,33 +61,33 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    entrypoint: ["/e2e/entrypoint.sh"]
     volumes:
-      # Must match KOMENTOJ_CONFIG env var set in the Dockerfile
       - ./e2e/komentoj.toml:/config/config.toml:ro
+      - ./e2e/certs:/e2e/certs:ro
+      - ./e2e/entrypoint.sh:/e2e/entrypoint.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
     networks:
-      fedi:
-        aliases:
-          - komentoj.local
-    ports:
-      - "8080:8080"
+      - fedi
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf 'http://localhost:8080/.well-known/webfinger?resource=acct:komentoj@komentoj.local:8080' || exit 1"]
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:8080/.well-known/webfinger?resource=acct:komentoj@komentoj.local' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
 
   # ── GoToSocial ───────────────────────────────────────────────────────────────
+  # GTS binds to HTTP port 8888 normally; Caddy terminates TLS on port 8888.
+  # GTS_PORT=8888 + GTS_PROTOCOL=https → GTS generates https://gotosocial.local:8888/…
   gotosocial:
-    image: superseriousbusiness/gotosocial:0.17.0
+    image: superseriousbusiness/gotosocial:0.20.3
     environment:
       GTS_HOST: gotosocial.local
       GTS_PORT: "8888"
-      GTS_PROTOCOL: http
+      GTS_PROTOCOL: https
       GTS_LETSENCRYPT_ENABLED: "false"
       GTS_DB_TYPE: postgres
       GTS_DB_ADDRESS: gts-postgres
@@ -96,17 +99,35 @@ services:
       GTS_ACCOUNTS_APPROVAL_REQUIRED: "false"
       GTS_ACCOUNTS_REASON_REQUIRED: "false"
       GTS_LOG_LEVEL: warn
+      # Trust the mkcert CA so GTS can make HTTPS requests to Caddy-fronted services
+      SSL_CERT_FILE: /e2e/certs/rootCA.pem
+      # Allow GTS to reach services on the Docker bridge network.
+      # By default GTS blocks all private/reserved IP ranges (SSRF protection).
+      GTS_HTTP_CLIENT_ALLOW_IPS: "172.16.0.0/12"
+    volumes:
+      - ./e2e/certs:/e2e/certs:ro
     depends_on:
       gts-postgres:
         condition: service_healthy
     networks:
+      - fedi
+
+  # ── Caddy (TLS termination + reverse proxy) ──────────────────────────────────
+  # Both komentoj.local and gotosocial.local resolve to Caddy inside the Docker
+  # network, so all inter-service traffic goes through HTTPS just as in prod.
+  caddy:
+    image: caddy:2
+    volumes:
+      - ./e2e/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./e2e/certs:/etc/caddy/certs:ro
+    ports:
+      - "443:443"
+      - "8888:8888"
+    networks:
       fedi:
         aliases:
+          - komentoj.local
           - gotosocial.local
-    ports:
-      - "8888:8888"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8888/api/v1/instance || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 18
+    depends_on:
+      - komentoj
+      - gotosocial
