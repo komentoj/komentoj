@@ -97,7 +97,9 @@ pub(crate) async fn handle_inbox(
     if !verified {
         // Re-fetch the actor and try the fresh key
         tracing::debug!("signature failed with cached key — re-fetching actor {actor_url}");
-        let actor = fetch_actor(&actor_url, &state).await?;
+        let actor = fetch_actor(&actor_url, &state).await.map_err(|_| {
+            AppError::Unauthorized("failed to fetch actor for signature verification".into())
+        })?;
         let fresh_pem = actor
             .public_key
             .as_ref()
@@ -1045,7 +1047,7 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO comments
                (id, post_id, actor_id, content_html, published_at, in_reply_to_local, visibility, raw_data)
-               VALUES ($1,$2,$3,'<p>old</p>',NOW(),FALSE,'public','{}'"#,
+               VALUES ($1,$2,$3,'<p>old</p>',NOW(),FALSE,'public','{}')"#,
         )
         .bind(note_id)
         .bind(post_id)
