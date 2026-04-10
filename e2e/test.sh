@@ -391,9 +391,74 @@ if [[ -n "$KOMENTOJ_GTS_ID" ]]; then
         'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers" | grep -qF "\"totalItems\":0"'
 fi
 
-# ── 15. API error cases ───────────────────────────────────────────────────────
+# ── 15. Image/file attachment round-trip ─────────────────────────────────────
+#
+# Upload a minimal 1×1 PNG to GTS, post a status with that attachment (plus a
+# mention so komentoj's inbox receives it), then verify that komentoj exposes
+# the attachment URL and mediaType in the comments API response.
 
-section "15. API error handling"
+section "15. Image attachment round-trip"
+
+# Re-sync the post (deactivated in §11) so we can receive new comments
+POST2_ID="e2e-attach-$(date +%s)"
+POST2_URL="https://gotosocial.local/posts/$POST2_ID"
+SYNC_ATTACH=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"posts\":[{\"id\":\"$POST2_ID\",\"title\":\"Attach Test\",\"url\":\"$POST2_URL\",\"content\":\"Attachment test.\"}]}")
+assert_contains "attachment test post synced" "$SYNC_ATTACH" '"upserted":1'
+
+# Generate a minimal 1×1 RGB PNG via Python (GTS validates image data with ffmpeg)
+TINY_PNG_FILE=$(mktemp --suffix=.png)
+python3 - <<'PYEOF' > "$TINY_PNG_FILE"
+import struct, zlib, sys
+def chunk(name, data):
+    c = struct.pack('>I', len(data)) + name + data
+    return c + struct.pack('>I', zlib.crc32(name + data) & 0xffffffff)
+ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+idat = chunk(b'IDAT', zlib.compress(b'\x00\xff\x00\x00'))
+sys.stdout.buffer.write(b'\x89PNG\r\n\x1a\n' + ihdr + idat + chunk(b'IEND', b''))
+PYEOF
+
+MEDIA_RESP=$(curl -sf \
+    -X POST "$GTS/api/v2/media" \
+    -H "Authorization: Bearer $GTS_TOKEN" \
+    -F "file=@$TINY_PNG_FILE;type=image/png" \
+    -F "description=E2E test image" || true)
+rm -f "$TINY_PNG_FILE"
+
+MEDIA_ID=$(echo "$MEDIA_RESP" | grep -oP '"id":"\K[^"]+' | head -1 || true)
+
+if [[ -n "$MEDIA_ID" ]]; then
+    ok "GTS media uploaded (id=$MEDIA_ID)"
+
+    ATTACH_STATUS=$(curl -sf -X POST "$GTS/api/v1/statuses" \
+        -H "Authorization: Bearer $GTS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"status\":\"Image test on $POST2_URL @komentoj@komentoj.local\",\"media_ids\":[\"$MEDIA_ID\"],\"visibility\":\"public\"}" || true)
+    ATTACH_STATUS_ID=$(echo "$ATTACH_STATUS" | grep -oP '"id":"\K[^"]+' | head -1 || true)
+
+    if [[ -n "$ATTACH_STATUS_ID" ]]; then
+        ok "GTS status with attachment posted (id=$ATTACH_STATUS_ID)"
+
+        wait_for "comment with attachment stored in komentoj" 30 \
+            'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST2_ID" | grep -qP "\"total\":[1-9]"'
+
+        ATTACH_COMMENTS=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST2_ID")
+        assert_contains "attachment comment received"  "$ATTACH_COMMENTS" '"attachments"'
+        assert_contains "attachment has url field"     "$ATTACH_COMMENTS" '"url"'
+        assert_contains "attachment has media_type"    "$ATTACH_COMMENTS" '"media_type"'
+        assert_contains "attachment is image"          "$ATTACH_COMMENTS" '"image/'
+    else
+        fail "GTS status with attachment failed: $ATTACH_STATUS"
+    fi
+else
+    fail "GTS media upload failed: $MEDIA_RESP"
+fi
+
+# ── 16. API error cases ───────────────────────────────────────────────────────
+
+section "16. API error handling"
 
 assert_http "comments: missing id → 400" 400 "$KOMENTOJ/api/v1/comments"
 assert_http "comments: unknown id → 404" 404 "$KOMENTOJ/api/v1/comments?id=__nonexistent__"

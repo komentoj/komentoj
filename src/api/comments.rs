@@ -51,6 +51,8 @@ pub struct CommentItem {
     /// Link back to the original post on the author's instance.
     pub source_url: String,
     pub instance: String,
+    /// Media attachments (images, videos, audio, etc.).
+    pub attachments: Vec<Attachment>,
     pub replies: Vec<CommentItem>,
 }
 
@@ -61,6 +63,20 @@ pub struct AuthorInfo {
     pub profile_url: Option<String>,
     pub avatar_url: Option<String>,
     pub instance: String,
+}
+
+#[derive(Serialize)]
+pub struct Attachment {
+    /// Direct URL to the media file.
+    pub url: String,
+    /// MIME type (e.g. "image/jpeg", "video/mp4").
+    pub media_type: Option<String>,
+    /// Alt text / description provided by the author.
+    pub name: Option<String>,
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+    /// Blurhash placeholder for images.
+    pub blurhash: Option<String>,
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -152,15 +168,18 @@ pub async fn get_comments(
     let mut flat: Vec<CommentItem> = rows
         .into_iter()
         .map(|r| {
-            let source_url =
-                r.5.as_ref()
-                    .and_then(|v| {
-                        v.get("url")
-                            .or_else(|| v.get("id"))
-                            .and_then(|u| u.as_str())
-                    })
-                    .unwrap_or(&r.0)
-                    .to_string();
+            let raw = r.5.as_ref();
+
+            let source_url = raw
+                .and_then(|v| {
+                    v.get("url")
+                        .or_else(|| v.get("id"))
+                        .and_then(|u| u.as_str())
+                })
+                .unwrap_or(&r.0)
+                .to_string();
+
+            let attachments = extract_attachments(raw);
 
             CommentItem {
                 id: r.0,
@@ -177,6 +196,7 @@ pub async fn get_comments(
                 in_reply_to: r.4,
                 source_url,
                 instance: r.10,
+                attachments,
                 replies: vec![],
             }
         })
@@ -214,4 +234,40 @@ pub async fn get_comments(
         comments: top_level,
         next_cursor,
     }))
+}
+
+/// Extract media attachments from the AP Note's raw_data JSON.
+/// Handles both array and single-object forms of the `attachment` field.
+fn extract_attachments(raw: Option<&serde_json::Value>) -> Vec<Attachment> {
+    let Some(raw) = raw else { return vec![] };
+
+    let items = match raw.get("attachment") {
+        Some(serde_json::Value::Array(arr)) => arr.as_slice(),
+        Some(obj @ serde_json::Value::Object(_)) => std::slice::from_ref(obj),
+        _ => return vec![],
+    };
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let url = item.get("url").and_then(|v| v.as_str())?.to_string();
+            Some(Attachment {
+                url,
+                media_type: item
+                    .get("mediaType")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                name: item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                width: item.get("width").and_then(|v| v.as_u64()),
+                height: item.get("height").and_then(|v| v.as_u64()),
+                blurhash: item
+                    .get("blurhash")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
 }
