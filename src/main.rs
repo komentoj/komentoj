@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/followers", get(followers_handler))
         .route("/following", get(following_handler))
         // Individual Note documents (fetched by remote AP servers to verify replies)
-        .route("/notes/:id", get(note_handler))
+        .route("/notes/{id}", get(note_handler))
         // Public REST API for the blog frontend
         .route("/api/v1/comments", get(get_comments))
         // Admin API (requires Bearer token)
