@@ -215,6 +215,7 @@ pub async fn make_test_state(pool: PgPool, domain: &str) -> AppState {
         server: ServerConfig { host: "127.0.0.1".into(), port: 8080 },
         instance: InstanceConfig {
             domain: domain.to_string(),
+            protocol: "https".into(),
             username: "komentoj".into(),
             display_name: "Test".into(),
             summary: "Test instance".into(),
