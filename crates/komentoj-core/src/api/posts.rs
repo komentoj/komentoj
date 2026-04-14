@@ -1,6 +1,13 @@
 //! Post registration + auto-publish / auto-update API.
 //!
-//! POST /api/v1/posts/sync
+//! Endpoints:
+//!   POST /api/v1/posts/sync
+//!     Legacy single-actor alias — operates on config.instance.username.
+//!
+//!   POST /api/v1/users/:username/posts/sync
+//!     Per-user sync. Authenticated either by the global admin token or by
+//!     the user's own `api_token` (users.api_token). The SaaS layer replaces
+//!     this with Supabase JWT + user lookup.
 //!
 //! Each post has a user-provided `id` (slug) as its sole unique key.
 //! `title`, `url`, and `content` (Markdown) are the content fields.
@@ -15,9 +22,12 @@
 use crate::{
     ap::publish::{publish_post_note, update_post_note},
     error::{AppError, AppResult},
-    state::AppState,
+    state::{AppState, UserKey},
 };
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
@@ -60,22 +70,65 @@ pub struct RejectedPost {
     pub reason: String,
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
+/// Legacy: POST /api/v1/posts/sync — operates on the configured owner.
 pub async fn sync_posts(
     State(state): State<AppState>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     Json(body): Json<SyncRequest>,
 ) -> AppResult<Json<SyncResponse>> {
-    if !bool::from(
-        bearer
-            .token()
-            .as_bytes()
-            .ct_eq(state.config.admin.token.as_bytes()),
-    ) {
+    // Admin token only, for backward compatibility.
+    if !constant_time_eq(bearer.token(), &state.config.admin.token) {
         return Err(AppError::Unauthorized("invalid admin token".into()));
     }
+    let user = state.load_user_key(state.owner_user_id).await?;
+    sync_posts_impl(&state, &user, body).await.map(Json)
+}
 
+/// Per-user: POST /api/v1/users/:username/posts/sync — admin token OR the
+/// user's own api_token (stored in `users.api_token`).
+pub async fn sync_posts_for_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    Json(body): Json<SyncRequest>,
+) -> AppResult<Json<SyncResponse>> {
+    let user = state.find_user(&username).await?;
+    let token = bearer.token();
+
+    // Authenticate: either the global admin token (OSS deployments) or the
+    // user's own api_token.
+    let admin_ok = constant_time_eq(token, &state.config.admin.token);
+    let user_token: Option<String> =
+        sqlx::query_scalar("SELECT api_token FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(AppError::from)?;
+    let user_ok = user_token
+        .as_deref()
+        .is_some_and(|t| !t.is_empty() && constant_time_eq(token, t));
+
+    if !(admin_ok || user_ok) {
+        return Err(AppError::Unauthorized("invalid token for user".into()));
+    }
+
+    let user_key = state.load_user_key(user.id).await?;
+    sync_posts_impl(&state, &user_key, body).await.map(Json)
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+// ── Core sync logic ───────────────────────────────────────────────────────────
+
+async fn sync_posts_impl(
+    state: &AppState,
+    user: &UserKey,
+    body: SyncRequest,
+) -> AppResult<SyncResponse> {
     let mut upserted = 0usize;
     let mut published = 0usize;
     let mut updated = 0usize;
@@ -126,14 +179,13 @@ pub async fn sync_posts(
              FROM posts WHERE id = $1 AND user_id = $2",
         )
         .bind(&post.id)
-        .bind(state.owner_user_id)
+        .bind(user.user_id)
         .fetch_optional(&state.db)
         .await?;
 
-        // Upsert. posts.id is a globally-unique slug PK today, so in OSS
-        // single-actor deployments the sync is per-user anyway. When we add
-        // per-user routes in a later phase we'll repin the PK to (user_id, id)
-        // to allow multiple users to reuse the same slug.
+        // Upsert. posts.id is a globally-unique slug PK today — multi-user
+        // deployments get cross-user collision rejection via the user_id
+        // guard in ON CONFLICT UPDATE.
         sqlx::query(
             r#"
             INSERT INTO posts (id, user_id, title, url, content, active, registered_at, updated_at)
@@ -144,10 +196,11 @@ pub async fn sync_posts(
                 content    = EXCLUDED.content,
                 active     = TRUE,
                 updated_at = NOW()
+            WHERE posts.user_id = EXCLUDED.user_id
             "#,
         )
         .bind(&post.id)
-        .bind(state.owner_user_id)
+        .bind(user.user_id)
         .bind(&post.title)
         .bind(&post.url)
         .bind(&post.content)
@@ -193,13 +246,12 @@ pub async fn sync_posts(
     }
 
     // Deactivate posts absent from this sync.
-    // An empty list means "no active posts" — deactivate everything.
     let deactivated = if !valid_ids.is_empty() {
         sqlx::query(
             "UPDATE posts SET active = FALSE, updated_at = NOW() \
              WHERE user_id = $1 AND active = TRUE AND id != ALL($2)",
         )
-        .bind(state.owner_user_id)
+        .bind(user.user_id)
         .bind(&valid_ids)
         .execute(&state.db)
         .await?
@@ -209,7 +261,7 @@ pub async fn sync_posts(
             "UPDATE posts SET active = FALSE, updated_at = NOW() \
              WHERE user_id = $1 AND active = TRUE",
         )
-        .bind(state.owner_user_id)
+        .bind(user.user_id)
         .execute(&state.db)
         .await?
         .rows_affected() as usize
@@ -225,8 +277,10 @@ pub async fn sync_posts(
             } => {
                 published += 1;
                 let s = state.clone();
+                let user = user.clone();
                 tokio::spawn(async move {
-                    match publish_post_note(&s, &id, title.as_deref(), &url, &content).await {
+                    match publish_post_note(&s, &user, &id, title.as_deref(), &url, &content).await
+                    {
                         Ok(note_id) => tracing::info!("published {note_id} for '{id}'"),
                         Err(e) => tracing::error!("publish failed for '{id}': {e}"),
                     }
@@ -242,9 +296,11 @@ pub async fn sync_posts(
             } => {
                 updated += 1;
                 let s = state.clone();
+                let user = user.clone();
                 tokio::spawn(async move {
                     match update_post_note(
                         &s,
+                        &user,
                         &note_id,
                         title.as_deref(),
                         &url,
@@ -262,11 +318,11 @@ pub async fn sync_posts(
         }
     }
 
-    Ok(Json(SyncResponse {
+    Ok(SyncResponse {
         upserted,
         published,
         updated,
         deactivated,
         rejected,
-    }))
+    })
 }

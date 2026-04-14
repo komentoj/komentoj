@@ -25,7 +25,11 @@ use crate::{
         },
         inbox::{inbox_handler, user_inbox_handler},
     },
-    api::{comments::get_comments, posts::sync_posts},
+    api::{
+        admin::{create_user, delete_user, list_users},
+        comments::{get_comments, get_comments_for_user},
+        posts::{sync_posts, sync_posts_for_user},
+    },
 };
 use axum::{
     http::{HeaderValue, Method},
@@ -79,8 +83,25 @@ pub fn build_router(state: AppState) -> Router {
         .route("/notes/{id}", get(note_handler))
         // ── Public REST API for the blog frontend ────────────────────────────
         .route("/api/v1/comments", get(get_comments))
-        // ── Admin API (requires Bearer token) ────────────────────────────────
+        .route(
+            "/api/v1/users/{username}/comments",
+            get(get_comments_for_user),
+        )
+        // ── Write API (admin token OR per-user api_token) ────────────────────
         .route("/api/v1/posts/sync", post(sync_posts))
+        .route(
+            "/api/v1/users/{username}/posts/sync",
+            post(sync_posts_for_user),
+        )
+        // ── Admin API (global admin token only) ─────────────────────────────
+        .route(
+            "/api/v1/admin/users",
+            post(create_user).get(list_users),
+        )
+        .route(
+            "/api/v1/admin/users/{username}",
+            axum::routing::delete(delete_user),
+        )
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

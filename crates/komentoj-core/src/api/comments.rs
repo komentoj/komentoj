@@ -1,17 +1,22 @@
 //! REST API consumed by the static blog frontend.
 //!
-//! GET /api/v1/comments?id=<post_id>[&before=<iso8601>][&limit=<n>]
+//! Endpoints:
+//!   GET /api/v1/comments?id=<post_id>[&before=<iso8601>][&limit=<n>]
+//!     Legacy single-actor alias — returns comments on the owner's posts.
+//!   GET /api/v1/users/:username/comments?id=...
+//!     Per-user comments for any registered local user.
 
 use crate::{
     error::{AppError, AppResult},
     state::AppState,
 };
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // ── Query params ──────────────────────────────────────────────────────────────
 
@@ -79,24 +84,43 @@ pub struct Attachment {
     pub blurhash: Option<String>,
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
+/// Legacy: GET /api/v1/comments — returns comments for the owner's posts.
 pub async fn get_comments(
     State(state): State<AppState>,
     Query(q): Query<CommentsQuery>,
 ) -> AppResult<Json<CommentsResponse>> {
+    let owner_id = state.owner_user_id;
+    list_comments(&state, owner_id, q).await.map(Json)
+}
+
+/// Per-user: GET /api/v1/users/:username/comments
+pub async fn get_comments_for_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    Query(q): Query<CommentsQuery>,
+) -> AppResult<Json<CommentsResponse>> {
+    let user = state.find_user(&username).await?;
+    list_comments(&state, user.id, q).await.map(Json)
+}
+
+async fn list_comments(
+    state: &AppState,
+    user_id: Uuid,
+    q: CommentsQuery,
+) -> AppResult<CommentsResponse> {
     let post_id = q.id.trim().to_string();
     if post_id.is_empty() {
         return Err(AppError::BadRequest("id must not be empty".into()));
     }
 
-    // Verify the post exists (scoped to the OSS owner user; SaaS will override
-    // via path param in a later phase)
+    // Verify the post exists and belongs to the requested user
     let exists: bool = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1 AND user_id = $2)",
     )
     .bind(&post_id)
-    .bind(state.owner_user_id)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -231,12 +255,12 @@ pub async fn get_comments(
     };
     top_level.truncate(limit as usize);
 
-    Ok(Json(CommentsResponse {
+    Ok(CommentsResponse {
         post_id,
         total,
         comments: top_level,
         next_cursor,
-    }))
+    })
 }
 
 /// Extract media attachments from the AP Note's raw_data JSON.
