@@ -1,0 +1,28 @@
+# Config for the multi-user e2e stack.
+# Runs over plain HTTP on port 8080 (no federation partner — no TLS needed).
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[instance]
+domain = "komentoj.local"
+protocol = "http"
+username = "comments"
+display_name = "Comments"
+summary = "E2E multi-user test instance"
+blog_domains = ["blog.example.com", "alice.example.com"]
+
+[database]
+url = "postgresql://komentoj:komentoj@postgres:5432/komentoj"
+max_connections = 5
+
+[redis]
+url = "redis://redis:6379"
+actor_cache_ttl = 3600
+
+[cors]
+allowed_origins = ["*"]
+
+[admin]
+token = "e2e-multi-user-admin-token"

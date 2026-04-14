@@ -37,7 +37,7 @@ use axum::{
     Router,
 };
 use tower_http::{
-    cors::{AllowHeaders, CorsLayer},
+    cors::{AllowHeaders, AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -48,17 +48,21 @@ use tower_http::{
 /// obtain a fully-configured `axum::Router`. Callers are free to layer
 /// additional middleware (auth, quota, tenancy) on top of the returned router.
 pub fn build_router(state: AppState) -> Router {
-    let allowed_origins: Vec<HeaderValue> = state
-        .config
-        .cors
-        .allowed_origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    // CORS for the public /api/* routes (blog frontends need this).
+    //
+    // `allowed_origins = ["*"]` in the config is treated as "any origin" —
+    // tower-http's `AllowOrigin::list` panics on a wildcard entry, so we
+    // pick the right constructor up front.
+    let origins = &state.config.cors.allowed_origins;
+    let allow_origin = if origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        let parsed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+        AllowOrigin::list(parsed)
+    };
 
-    // CORS for the public /api/* routes (blog frontends need this)
     let cors = CorsLayer::new()
-        .allow_origin(allowed_origins)
+        .allow_origin(allow_origin)
         .allow_methods([Method::GET, Method::OPTIONS])
         .allow_headers(AllowHeaders::any());
 

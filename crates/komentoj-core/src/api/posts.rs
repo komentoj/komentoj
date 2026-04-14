@@ -83,7 +83,7 @@ pub async fn sync_posts(
         return Err(AppError::Unauthorized("invalid admin token".into()));
     }
     let user = state.load_user_key(state.owner_user_id).await?;
-    sync_posts_impl(&state, &user, body).await.map(Json)
+    run_sync(&state, &user, body).await.map(Json)
 }
 
 /// Per-user: POST /api/v1/users/:username/posts/sync — admin token OR the
@@ -115,7 +115,7 @@ pub async fn sync_posts_for_user(
     }
 
     let user_key = state.load_user_key(user.id).await?;
-    sync_posts_impl(&state, &user_key, body).await.map(Json)
+    run_sync(&state, &user_key, body).await.map(Json)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -124,7 +124,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
-async fn sync_posts_impl(
+/// The sync pipeline minus any HTTP-layer auth. Exposed so external
+/// auth/middleware layers (e.g. the SaaS Supabase flow) can authenticate
+/// out-of-band and still run the identical ingest / publish logic.
+pub async fn run_sync(
     state: &AppState,
     user: &UserKey,
     body: SyncRequest,

@@ -1,0 +1,45 @@
+# Minimal stack for the multi-user e2e test: komentoj + Postgres + Redis.
+# No federation partner needed — we exercise admin + per-user routes directly.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: komentoj
+      POSTGRES_PASSWORD: komentoj
+      POSTGRES_DB: komentoj
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U komentoj"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  komentoj:
+    image: ${KOMENTOJ_IMAGE:-komentoj:local}
+    build:
+      context: ../..
+    environment:
+      KOMENTOJ_CONFIG: /config/config.toml
+      RUST_LOG: komentoj=info,komentoj_core=info
+    volumes:
+      - ./komentoj.toml:/config/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -sf 'http://localhost:8080/.well-known/webfinger?resource=acct:comments@komentoj.local' || exit 1"
+      interval: 5s
+      retries: 24

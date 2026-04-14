@@ -63,6 +63,54 @@ jobs:
           DATABASE_URL: ${{ env.DATABASE_URL }}
           SQLX_OFFLINE: false
 
+  # ── Multi-user surface tests (no federation, fast) ───────────────────────────
+  e2e-multi-user:
+    name: E2E — Multi-user
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build komentoj image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: komentoj:e2e
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start multi-user stack
+        run: |
+          KOMENTOJ_IMAGE=komentoj:e2e \
+            docker compose -f e2e/multi-user/docker-compose.yml up -d --no-build
+
+      - name: Wait for komentoj healthy
+        run: |
+          for i in $(seq 1 24); do
+            if curl -sf 'http://127.0.0.1:18080/.well-known/webfinger?resource=acct:comments@komentoj.local' >/dev/null 2>&1; then
+              echo "ready"; exit 0
+            fi
+            sleep 5
+          done
+          echo "komentoj did not become healthy"; exit 1
+
+      - name: Run multi-user E2E
+        run: ./e2e/multi-user/test.sh
+
+      - name: Dump logs
+        if: failure()
+        run: |
+          docker compose -f e2e/multi-user/docker-compose.yml logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/multi-user/docker-compose.yml down -v
+
   # ── GoToSocial federation tests ──────────────────────────────────────────────
   e2e-gotosocial:
     name: E2E — GoToSocial
@@ -228,7 +276,7 @@ jobs:
   # ── Publish Docker image (only on main push or tag, after all tests pass) ────
   publish:
     name: Publish Docker image
-    needs: [test, e2e-gotosocial, e2e-mastodon]
+    needs: [test, e2e-multi-user, e2e-gotosocial, e2e-mastodon]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
