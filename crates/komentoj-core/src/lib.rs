@@ -1,11 +1,20 @@
-mod ap;
-mod api;
-mod config;
-mod error;
-mod state;
+//! Core library for komentoj — an ActivityPub comment server.
+//!
+//! Exposes configuration loading, shared application state, the router builder,
+//! and all AP/API handlers. A thin binary wrapper (the `komentoj` crate) is
+//! responsible only for initializing tracing and starting the HTTP server.
+
+pub mod ap;
+pub mod api;
+pub mod config;
+pub mod error;
+pub mod state;
 
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
+
+pub use config::Config;
+pub use state::AppState;
 
 use crate::{
     ap::{
@@ -16,46 +25,31 @@ use crate::{
         inbox::inbox_handler,
     },
     api::{comments::get_comments, posts::sync_posts},
-    state::AppState,
 };
 use axum::{
     http::{HeaderValue, Method},
     routing::{get, post},
     Router,
 };
-use std::net::SocketAddr;
 use tower_http::{
     cors::{AllowHeaders, CorsLayer},
     trace::TraceLayer,
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Tracing
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "komentoj=info".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    // Config
-    let config_path = std::env::var("KOMENTOJ_CONFIG").unwrap_or_else(|_| "config.toml".into());
-    let config = config::Config::load(&config_path)?;
-
-    tracing::info!(
-        "starting komentoj for @{}@{}",
-        config.instance.username,
-        config.instance.domain
-    );
-
-    let allowed_origins: Vec<HeaderValue> = config
+/// Build the application router with all ActivityPub and public API routes
+/// wired to the provided state.
+///
+/// This is the single entry point a binary or SaaS wrapper should use to
+/// obtain a fully-configured `axum::Router`. Callers are free to layer
+/// additional middleware (auth, quota, tenancy) on top of the returned router.
+pub fn build_router(state: AppState) -> Router {
+    let allowed_origins: Vec<HeaderValue> = state
+        .config
         .cors
         .allowed_origins
         .iter()
         .filter_map(|o| o.parse().ok())
         .collect();
-
-    let state = AppState::new(config).await?;
 
     // CORS for the public /api/* routes (blog frontends need this)
     let cors = CorsLayer::new()
@@ -63,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods([Method::GET, Method::OPTIONS])
         .allow_headers(AllowHeaders::any());
 
-    let app = Router::new()
+    Router::new()
         // ActivityPub / Fediverse discovery
         .route("/.well-known/webfinger", get(webfinger_handler))
         .route("/actor", get(actor_handler))
@@ -79,14 +73,5 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/posts/sync", post(sync_posts))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
-
-    let addr: SocketAddr =
-        format!("{}:{}", state.config.server.host, state.config.server.port).parse()?;
-
-    tracing::info!("listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
+        .with_state(state)
 }

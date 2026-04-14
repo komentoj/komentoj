@@ -2,16 +2,13 @@ FROM rust:slim-bookworm AS builder
 
 WORKDIR /app
 
-# Cache dependencies separately from source
+# Copy the whole workspace. The single-crate dep-caching trick doesn't transfer
+# cleanly to a lib + bin workspace, so rely on BuildKit's layer cache
+# (`cache-from`/`cache-to` in CI) instead.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main(){}' > src/main.rs \
-    && cargo build --release \
-    && rm -rf src
+COPY crates ./crates
 
-COPY src ./src
-COPY migrations ./migrations
-# Touch main.rs so cargo knows it changed
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release --bin komentoj
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
