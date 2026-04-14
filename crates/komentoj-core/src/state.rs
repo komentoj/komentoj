@@ -1,4 +1,8 @@
-use crate::{ap::fetch::build_http_client, config::Config};
+use crate::{
+    ap::fetch::build_http_client,
+    config::Config,
+    error::{AppError, AppResult},
+};
 use anyhow::{Context, Result};
 use deadpool_redis::{Config as RedisConfig, Pool as RedisPool, Runtime};
 use reqwest::Client;
@@ -9,6 +13,17 @@ use rsa::{
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// A local user's public-facing profile: everything needed to serve an actor
+/// document without touching the private key.
+#[derive(Clone, Debug)]
+pub struct LocalUser {
+    pub id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub summary: String,
+    pub public_key_pem: String,
+}
 
 /// An RSA keypair belonging to a single local user (used to sign that user's
 /// outbound ActivityPub requests).
@@ -186,4 +201,69 @@ async fn load_user_key_by_username(db: &PgPool, username: &str) -> Result<Option
         public_key,
         public_key_pem: public_pem,
     }))
+}
+
+// ── Per-request user resolution (Phase 2+) ───────────────────────────────────
+
+impl AppState {
+    /// Look up a local user by their username. Returns `AppError::NotFound`
+    /// if no user with that name exists. Case-insensitive because
+    /// `users.username` is `CITEXT`.
+    pub async fn find_user(&self, username: &str) -> AppResult<LocalUser> {
+        let row = sqlx::query_as::<_, (Uuid, String, String, String, String)>(
+            "SELECT u.id, u.username::text, u.display_name, u.summary, k.public_key_pem \
+             FROM users u JOIN user_keys k ON k.user_id = u.id \
+             WHERE u.username = $1",
+        )
+        .bind(username)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(AppError::from)?;
+
+        let (id, username, display_name, summary, public_key_pem) =
+            row.ok_or(AppError::NotFound)?;
+        Ok(LocalUser {
+            id,
+            username,
+            display_name,
+            summary,
+            public_key_pem,
+        })
+    }
+
+    /// Load the full keypair for a user, given their id. This is only needed
+    /// for outbound operations (publish/send_accept) that sign on the user's
+    /// behalf. Reading private-key material from the DB on every hot-path
+    /// request is intentional for now; a later phase can add a Redis-backed
+    /// key cache keyed by user_id.
+    pub async fn load_user_key(&self, user_id: Uuid) -> AppResult<UserKey> {
+        let row = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT u.username::text, k.private_key_pem, k.public_key_pem \
+             FROM users u JOIN user_keys k ON k.user_id = u.id \
+             WHERE u.id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(AppError::from)?;
+
+        let (username, private_pem, public_pem) = row.ok_or(AppError::NotFound)?;
+
+        let private_key = Arc::new(
+            RsaPrivateKey::from_pkcs8_pem(&private_pem)
+                .map_err(|e| AppError::Crypto(format!("parsing private key: {e}")))?,
+        );
+        let public_key = Arc::new(
+            RsaPublicKey::from_public_key_pem(&public_pem)
+                .map_err(|e| AppError::Crypto(format!("parsing public key: {e}")))?,
+        );
+
+        Ok(UserKey {
+            user_id,
+            username,
+            private_key,
+            public_key,
+            public_key_pem: public_pem,
+        })
+    }
 }

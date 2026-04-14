@@ -29,11 +29,11 @@ use crate::{
         types::{IncomingActivity, Note},
     },
     error::{AppError, AppResult},
-    state::AppState,
+    state::{AppState, LocalUser},
 };
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -44,31 +44,64 @@ use std::collections::HashMap;
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+/// Legacy single-actor inbox: `POST /inbox` → target = owner user.
 pub async fn inbox_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    match handle_inbox(state, headers, body).await {
-        Ok(()) => StatusCode::ACCEPTED,
-        Err(AppError::Unauthorized(msg)) => {
+    let username = state.owner_key.username.clone();
+    let target = match state.find_user(&username).await {
+        Ok(u) => u,
+        Err(e) => return map_inbox_error(e),
+    };
+    map_inbox_result(handle_inbox(state, target, "/inbox", headers, body).await)
+}
+
+/// Per-user inbox: `POST /users/:username/inbox`.
+pub async fn user_inbox_handler(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let target = match state.find_user(&username).await {
+        Ok(u) => u,
+        Err(e) => return map_inbox_error(e),
+    };
+    let path = format!("/users/{username}/inbox");
+    map_inbox_result(handle_inbox(state, target, &path, headers, body).await)
+}
+
+fn map_inbox_error(e: AppError) -> StatusCode {
+    match e {
+        AppError::NotFound => StatusCode::NOT_FOUND,
+        AppError::Unauthorized(msg) => {
             tracing::warn!("inbox 401: {msg}");
             StatusCode::UNAUTHORIZED
         }
-        Err(AppError::BadRequest(msg)) => {
+        AppError::BadRequest(msg) => {
             tracing::warn!("inbox 400: {msg}");
             StatusCode::BAD_REQUEST
         }
-        Err(AppError::NotFound) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("inbox 500: {e}");
+        other => {
+            tracing::error!("inbox 500: {other}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
 
+fn map_inbox_result(r: AppResult<()>) -> StatusCode {
+    match r {
+        Ok(()) => StatusCode::ACCEPTED,
+        Err(e) => map_inbox_error(e),
+    }
+}
+
 pub(crate) async fn handle_inbox(
     state: AppState,
+    target: LocalUser,
+    request_path: &str,
     raw_headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<()> {
@@ -89,7 +122,7 @@ pub(crate) async fn handle_inbox(
     let cached_pem = get_cached_public_key_pem(&state, &actor_url).await;
 
     let verified = if let Ok(pem) = cached_pem {
-        verify_request("post", "/inbox", &headers, &body, &pem).is_ok()
+        verify_request("post", request_path, &headers, &body, &pem).is_ok()
     } else {
         false
     };
@@ -105,7 +138,7 @@ pub(crate) async fn handle_inbox(
             .as_ref()
             .map(|k| k.public_key_pem.clone())
             .ok_or_else(|| AppError::Unauthorized("actor has no publicKey".into()))?;
-        verify_request("post", "/inbox", &headers, &body, &fresh_pem)?;
+        verify_request("post", request_path, &headers, &body, &fresh_pem)?;
     }
 
     // Deserialize the activity
@@ -146,8 +179,9 @@ pub(crate) async fn handle_inbox(
     // side can retry on its next delivery attempt.
     let state_clone = state.clone();
     let aid = activity_id.clone();
+    let target_clone = target.clone();
     tokio::spawn(async move {
-        if let Err(e) = process_activity(state_clone.clone(), activity).await {
+        if let Err(e) = process_activity(state_clone.clone(), target_clone, activity).await {
             tracing::error!("activity processing error: {e:#}");
             let _ = sqlx::query("DELETE FROM processed_activities WHERE activity_id = $1")
                 .bind(&aid)
@@ -161,15 +195,19 @@ pub(crate) async fn handle_inbox(
 
 // ── Activity dispatcher ───────────────────────────────────────────────────────
 
-async fn process_activity(state: AppState, activity: IncomingActivity) -> anyhow::Result<()> {
+async fn process_activity(
+    state: AppState,
+    target: LocalUser,
+    activity: IncomingActivity,
+) -> anyhow::Result<()> {
     let actor_id = activity.actor.id().unwrap_or("").to_string();
 
     match activity.activity_type.as_str() {
-        "Create" => handle_create(&state, &activity, &actor_id).await?,
-        "Update" => handle_update(&state, &activity, &actor_id).await?,
+        "Create" => handle_create(&state, &target, &activity, &actor_id).await?,
+        "Update" => handle_update(&state, &target, &activity, &actor_id).await?,
         "Delete" => handle_delete(&state, &activity, &actor_id).await?,
-        "Follow" => handle_follow(&state, &activity, &actor_id).await?,
-        "Undo" => handle_undo(&state, &activity, &actor_id).await?,
+        "Follow" => handle_follow(&state, &target, &activity, &actor_id).await?,
+        "Undo" => handle_undo(&state, &target, &activity, &actor_id).await?,
         t => tracing::debug!("ignoring activity type '{t}'"),
     }
 
@@ -180,6 +218,7 @@ async fn process_activity(state: AppState, activity: IncomingActivity) -> anyhow
 
 async fn handle_create(
     state: &AppState,
+    target: &LocalUser,
     activity: &IncomingActivity,
     actor_id: &str,
 ) -> anyhow::Result<()> {
@@ -225,7 +264,7 @@ async fn handle_create(
     //  1. inReplyTo matches one of our AP Note IDs  ← main reply flow
     //  2. inReplyTo is a comment we already know    ← reply-to-reply
     //  3. Note content contains a URL matching posts.url ← mention fallback
-    let Some(post_id) = resolve_post_id(state, &note).await else {
+    let Some(post_id) = resolve_post_id(state, target, &note).await else {
         tracing::debug!(
             "Create: cannot associate note {} with any registered post",
             note.id
@@ -283,6 +322,7 @@ async fn handle_create(
 
 async fn handle_update(
     state: &AppState,
+    _target: &LocalUser,
     activity: &IncomingActivity,
     actor_id: &str,
 ) -> anyhow::Result<()> {
@@ -367,17 +407,25 @@ async fn handle_delete(
 
 async fn handle_follow(
     state: &AppState,
+    target: &LocalUser,
     activity: &IncomingActivity,
     actor_id: &str,
 ) -> anyhow::Result<()> {
-    // Reject Follow activities not directed at our actor — any signed delivery
-    // to /inbox would otherwise subscribe the sender to this service's fan-out.
-    let our_actor = state.config.actor_url();
+    // Reject Follow activities not directed at the target actor. A Follow of
+    // `/users/alice` delivered to alice's inbox is valid; a Follow of
+    // `/users/bob` delivered to alice's inbox is not. The legacy `/actor` URL
+    // is accepted as an alias when target == owner.
+    let target_actor = state.config.user_actor_url(&target.username);
+    let legacy_actor = state.config.actor_url();
     let object_id = activity.object.as_ref().map(object_id_from_value);
-    if object_id.as_deref() != Some(our_actor.as_str()) {
+    let oid = object_id.as_deref();
+    let is_target = oid == Some(target_actor.as_str());
+    let is_legacy = oid == Some(legacy_actor.as_str()) && target.id == state.owner_user_id;
+    if !(is_target || is_legacy) {
         tracing::debug!(
-            "Follow: object {:?} does not match our actor, ignoring",
-            object_id
+            "Follow: object {:?} does not match target actor {}, ignoring",
+            object_id,
+            target_actor
         );
         return Ok(());
     }
@@ -405,22 +453,23 @@ async fn handle_follow(
         ON CONFLICT (user_id, actor_id) DO UPDATE SET inbox_url = EXCLUDED.inbox_url, accepted = TRUE
         "#,
     )
-    .bind(state.owner_user_id)
+    .bind(target.id)
     .bind(actor_id)
     .bind(&inbox)
     .execute(&state.db)
     .await?;
 
-    // Send Accept(Follow) back
+    // Send Accept(Follow) back, signed with the target user's key
     let follow_id = activity.id.as_deref().unwrap_or(actor_id);
-    send_accept(state, actor_id, follow_id, &inbox).await?;
+    send_accept(state, target, actor_id, follow_id, &inbox).await?;
 
-    tracing::info!("accepted Follow from {actor_id}");
+    tracing::info!("accepted Follow for @{} from {actor_id}", target.username);
     Ok(())
 }
 
 async fn handle_undo(
     state: &AppState,
+    target: &LocalUser,
     activity: &IncomingActivity,
     actor_id: &str,
 ) -> anyhow::Result<()> {
@@ -443,11 +492,14 @@ async fn handle_undo(
 
     if object_type == "Follow" || object_type.is_empty() {
         sqlx::query("DELETE FROM followers WHERE user_id = $1 AND actor_id = $2")
-            .bind(state.owner_user_id)
+            .bind(target.id)
             .bind(actor_id)
             .execute(&state.db)
             .await?;
-        tracing::info!("removed follower {actor_id}");
+        tracing::info!(
+            "removed follower {actor_id} from @{}",
+            target.username
+        );
     }
 
     Ok(())
@@ -457,10 +509,12 @@ async fn handle_undo(
 
 async fn send_accept(
     state: &AppState,
+    target: &LocalUser,
     follower_actor_url: &str,
     follow_activity_id: &str,
     inbox_url: &str,
 ) -> anyhow::Result<()> {
+    let target_actor_url = state.config.user_actor_url(&target.username);
     let accept = serde_json::json!({
         "@context": "https://www.w3.org/ns/activitystreams",
         "id": format!(
@@ -469,12 +523,12 @@ async fn send_accept(
             uuid::Uuid::new_v4()
         ),
         "type": "Accept",
-        "actor": state.config.actor_url(),
+        "actor": target_actor_url,
         "object": {
             "type": "Follow",
             "id": follow_activity_id,
             "actor": follower_actor_url,
-            "object": state.config.actor_url(),
+            "object": target_actor_url,
         }
     });
 
@@ -485,13 +539,22 @@ async fn send_accept(
     let host = parsed.host_str().unwrap_or("").to_string();
     let path = parsed.path().to_string();
 
+    // Reuse the owner key when target == owner to avoid a DB lookup on the hot
+    // Follow path. Otherwise load the target's keypair from user_keys.
+    let signing_key: std::sync::Arc<rsa::RsaPrivateKey> = if target.id == state.owner_user_id {
+        state.owner_key.private_key.clone()
+    } else {
+        state.load_user_key(target.id).await?.private_key
+    };
+    let key_id = state.config.user_key_id(&target.username);
+
     let sig_headers = sign_request(
         "post",
         &path,
         &host,
         Some(&body),
-        &state.owner_key.private_key,
-        &state.config.key_id(),
+        &signing_key,
+        &key_id,
     )?;
 
     let response = state
@@ -539,14 +602,14 @@ pub(crate) fn object_id_from_value(value: &Value) -> String {
 /// 1. inReplyTo matches one of our AP Note IDs → look up post id
 /// 2. inReplyTo is a comment we already have   → inherit its post_id
 /// 3. Fallback: URL in note content matches posts.url (mention flow)
-async fn resolve_post_id(state: &AppState, note: &Note) -> Option<String> {
+async fn resolve_post_id(state: &AppState, target: &LocalUser, note: &Note) -> Option<String> {
     if let Some(reply_to_id) = note.in_reply_to.as_ref().and_then(|r| r.id()) {
-        // Step 1: reply to our announcement Note
+        // Step 1: reply to one of the target user's announcement Notes
         let post_id: Option<String> = sqlx::query_scalar::<_, String>(
             "SELECT id FROM posts WHERE ap_note_id = $1 AND user_id = $2 AND active = TRUE",
         )
         .bind(reply_to_id)
-        .bind(state.owner_user_id)
+        .bind(target.id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -556,11 +619,16 @@ async fn resolve_post_id(state: &AppState, note: &Note) -> Option<String> {
             return post_id;
         }
 
-        // Step 2: reply to an existing comment
+        // Step 2: reply to an existing comment on one of the target's posts.
+        // We join posts so a comment found via an unrelated user's thread does
+        // not resolve across the user boundary.
         let post_id: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT post_id FROM comments WHERE id = $1 AND deleted_at IS NULL",
+            "SELECT c.post_id FROM comments c \
+             JOIN posts p ON p.id = c.post_id \
+             WHERE c.id = $1 AND c.deleted_at IS NULL AND p.user_id = $2",
         )
         .bind(reply_to_id)
+        .bind(target.id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -572,12 +640,16 @@ async fn resolve_post_id(state: &AppState, note: &Note) -> Option<String> {
     }
 
     // Step 3: URL in note content matches a registered post's optional url field
-    extract_post_id_by_url(state, note).await
+    extract_post_id_by_url(state, target, note).await
 }
 
 /// Fallback: find a URL in the note content that matches a registered post's `url` field.
 /// Returns the post's `id` (not the URL).
-async fn extract_post_id_by_url(state: &AppState, note: &Note) -> Option<String> {
+async fn extract_post_id_by_url(
+    state: &AppState,
+    target: &LocalUser,
+    note: &Note,
+) -> Option<String> {
     // Collect candidate URLs from AP tag array and HTML content hrefs
     let mut candidates: Vec<String> = Vec::new();
 
@@ -597,7 +669,7 @@ async fn extract_post_id_by_url(state: &AppState, note: &Note) -> Option<String>
             "SELECT id FROM posts WHERE url = $1 AND user_id = $2 AND active = TRUE",
         )
         .bind(&url)
-        .bind(state.owner_user_id)
+        .bind(target.id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -750,7 +822,7 @@ mod tests {
         let body = Bytes::from(b"{}".to_vec());
         let headers = HeaderMap::new(); // no Signature header
 
-        let result = handle_inbox(state, headers, body).await;
+        let result = crate::test_helpers::handle_inbox_as_owner(state, headers, body).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -778,7 +850,7 @@ mod tests {
             "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into(),
         );
 
-        let result = handle_inbox(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -803,7 +875,7 @@ mod tests {
         let key_id = format!("{}#main-key", alice_url); // ← signed by alice
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        let result = handle_inbox(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -832,7 +904,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
@@ -872,7 +944,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox should return Ok (activity is ignored, not rejected)");
 
@@ -914,7 +986,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
@@ -966,7 +1038,7 @@ mod tests {
         // Send the same activity twice
         for _ in 0..2 {
             let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
-            handle_inbox(
+            crate::test_helpers::handle_inbox_as_owner(
                 make_test_state(pool.clone(), TEST_DOMAIN).await,
                 header_map(&headers),
                 Bytes::from(body_bytes.clone()),
@@ -1019,7 +1091,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
@@ -1077,7 +1149,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        handle_inbox(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 

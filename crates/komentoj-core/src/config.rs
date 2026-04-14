@@ -80,24 +80,70 @@ impl Config {
         format!("{}://{}", self.instance.protocol, self.instance.domain)
     }
 
-    /// Canonical actor URL: {protocol}://{domain}/actor
+    // ── Legacy single-actor URLs (delegate to the configured owner user) ─────
+    //
+    // These keep the pre-multi-user URL scheme alive for backward compatibility
+    // with blogs that hard-coded /actor, /inbox, /notes/:id, etc. They always
+    // resolve to `config.instance.username`.
+
+    /// Canonical actor URL for the configured owner: {base}/actor
     pub fn actor_url(&self) -> String {
         format!("{}/actor", self.base_url())
     }
 
-    /// Canonical key ID: {protocol}://{domain}/actor#main-key
+    /// Canonical key ID for the configured owner: {base}/actor#main-key
     pub fn key_id(&self) -> String {
         format!("{}/actor#main-key", self.base_url())
     }
 
-    /// Inbox URL
+    /// Inbox URL for the configured owner: {base}/inbox
     pub fn inbox_url(&self) -> String {
         format!("{}/inbox", self.base_url())
     }
 
-    /// acct: URI for WebFinger
+    /// acct: URI for the configured owner
     pub fn acct(&self) -> String {
-        format!("acct:{}@{}", self.instance.username, self.instance.domain)
+        self.user_acct(&self.instance.username)
+    }
+
+    // ── Per-user URLs (Mastodon-style /users/:username/…) ───────────────────
+    //
+    // These are the canonical multi-user URLs. The legacy helpers above are
+    // kept as conveniences for the owner user.
+
+    /// Actor URL: {base}/users/{username}
+    pub fn user_actor_url(&self, username: &str) -> String {
+        format!("{}/users/{}", self.base_url(), username)
+    }
+
+    /// Key ID: {base}/users/{username}#main-key
+    pub fn user_key_id(&self, username: &str) -> String {
+        format!("{}/users/{}#main-key", self.base_url(), username)
+    }
+
+    /// Per-user inbox URL: {base}/users/{username}/inbox
+    pub fn user_inbox_url(&self, username: &str) -> String {
+        format!("{}/users/{}/inbox", self.base_url(), username)
+    }
+
+    /// Per-user followers URL: {base}/users/{username}/followers
+    pub fn user_followers_url(&self, username: &str) -> String {
+        format!("{}/users/{}/followers", self.base_url(), username)
+    }
+
+    /// Per-user outbox URL
+    pub fn user_outbox_url(&self, username: &str) -> String {
+        format!("{}/users/{}/outbox", self.base_url(), username)
+    }
+
+    /// Per-user Note URL: {base}/users/{username}/notes/{uuid}
+    pub fn user_note_url(&self, username: &str, note_uuid: &str) -> String {
+        format!("{}/users/{}/notes/{}", self.base_url(), username, note_uuid)
+    }
+
+    /// Per-user WebFinger acct URI
+    pub fn user_acct(&self, username: &str) -> String {
+        format!("acct:{}@{}", username, self.instance.domain)
     }
 
     /// Check whether a URL belongs to one of the configured blog domains

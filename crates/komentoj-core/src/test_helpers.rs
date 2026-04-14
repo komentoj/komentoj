@@ -194,6 +194,19 @@ pub fn signed_inbox_headers(
     h
 }
 
+/// Convenience wrapper for tests: run `handle_inbox` with the configured
+/// owner as the target user and the legacy `/inbox` path. Matches the shape
+/// tests used before the per-user refactor.
+pub async fn handle_inbox_as_owner(
+    state: crate::state::AppState,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> crate::error::AppResult<()> {
+    let username = state.owner_key.username.clone();
+    let target = state.find_user(&username).await?;
+    crate::ap::inbox::handle_inbox(state, target, "/inbox", headers, body).await
+}
+
 /// Convert a `HashMap<String,String>` of lowercase header names to an
 /// `axum::http::HeaderMap` so it can be passed to `handle_inbox`.
 pub fn to_header_map(headers: &HashMap<String, String>) -> axum::http::HeaderMap {
