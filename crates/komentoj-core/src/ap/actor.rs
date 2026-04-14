@@ -111,7 +111,7 @@ pub async fn actor_handler(
         public_key: PublicKeyObject {
             id: key_id,
             owner: Some(actor_url),
-            public_key_pem: state.key.public_key_pem.clone(),
+            public_key_pem: state.owner_key.public_key_pem.clone(),
         },
         manually_approves_followers: false,
         discoverable: true,
@@ -147,11 +147,13 @@ pub async fn outbox_handler(State(state): State<AppState>) -> impl IntoResponse 
 
 pub async fn followers_handler(State(state): State<AppState>) -> impl IntoResponse {
     let base = state.config.base_url();
-    let count: i64 =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM followers WHERE accepted = TRUE")
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let count: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM followers WHERE user_id = $1 AND accepted = TRUE",
+    )
+    .bind(state.owner_user_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -195,9 +197,10 @@ pub async fn note_handler(
 
     let row = sqlx::query_as::<_, (Option<String>, String, String, DateTime<Utc>, DateTime<Utc>)>(
         "SELECT title, url, content, registered_at, updated_at \
-         FROM posts WHERE ap_note_id = $1 AND active = TRUE",
+         FROM posts WHERE ap_note_id = $1 AND user_id = $2 AND active = TRUE",
     )
     .bind(&note_id)
+    .bind(state.owner_user_id)
     .fetch_optional(&state.db)
     .await?;
 

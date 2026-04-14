@@ -400,11 +400,12 @@ async fn handle_follow(
 
     sqlx::query(
         r#"
-        INSERT INTO followers (actor_id, inbox_url, accepted)
-        VALUES ($1, $2, TRUE)
-        ON CONFLICT (actor_id) DO UPDATE SET inbox_url = EXCLUDED.inbox_url, accepted = TRUE
+        INSERT INTO followers (user_id, actor_id, inbox_url, accepted)
+        VALUES ($1, $2, $3, TRUE)
+        ON CONFLICT (user_id, actor_id) DO UPDATE SET inbox_url = EXCLUDED.inbox_url, accepted = TRUE
         "#,
     )
+    .bind(state.owner_user_id)
     .bind(actor_id)
     .bind(&inbox)
     .execute(&state.db)
@@ -441,7 +442,8 @@ async fn handle_undo(
     }
 
     if object_type == "Follow" || object_type.is_empty() {
-        sqlx::query("DELETE FROM followers WHERE actor_id = $1")
+        sqlx::query("DELETE FROM followers WHERE user_id = $1 AND actor_id = $2")
+            .bind(state.owner_user_id)
             .bind(actor_id)
             .execute(&state.db)
             .await?;
@@ -488,7 +490,7 @@ async fn send_accept(
         &path,
         &host,
         Some(&body),
-        &state.key.private_key,
+        &state.owner_key.private_key,
         &state.config.key_id(),
     )?;
 
@@ -541,9 +543,10 @@ async fn resolve_post_id(state: &AppState, note: &Note) -> Option<String> {
     if let Some(reply_to_id) = note.in_reply_to.as_ref().and_then(|r| r.id()) {
         // Step 1: reply to our announcement Note
         let post_id: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM posts WHERE ap_note_id = $1 AND active = TRUE",
+            "SELECT id FROM posts WHERE ap_note_id = $1 AND user_id = $2 AND active = TRUE",
         )
         .bind(reply_to_id)
+        .bind(state.owner_user_id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -591,9 +594,10 @@ async fn extract_post_id_by_url(state: &AppState, note: &Note) -> Option<String>
 
     for url in candidates {
         let post_id: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM posts WHERE url = $1 AND active = TRUE",
+            "SELECT id FROM posts WHERE url = $1 AND user_id = $2 AND active = TRUE",
         )
         .bind(&url)
+        .bind(state.owner_user_id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -896,7 +900,7 @@ mod tests {
 
         let state = make_test_state(pool.clone(), TEST_DOMAIN).await;
         insert_test_actor(&pool, actor_url, inbox_url).await;
-        insert_test_post(&pool, post_id, post_url, &ap_note_id).await;
+        insert_test_post(&pool, state.owner_user_id, post_id, post_url, &ap_note_id).await;
 
         let note = make_note_json(
             note_id,
@@ -942,9 +946,11 @@ mod tests {
         let note_id = "https://remote.example/notes/dedup-comment";
         let activity_id = "https://remote.example/activities/dedup-1";
 
+        let bootstrap_state = make_test_state(pool.clone(), TEST_DOMAIN).await;
         insert_test_actor(&pool, actor_url, inbox_url).await;
         insert_test_post(
             &pool,
+            bootstrap_state.owner_user_id,
             post_id,
             "https://blog.example.com/dedup",
             &ap_note_id,
@@ -991,12 +997,16 @@ mod tests {
         insert_test_actor(&pool, actor_url, inbox_url).await;
 
         // Seed an existing follower record
-        sqlx::query("INSERT INTO followers (actor_id, inbox_url, accepted) VALUES ($1,$2,TRUE)")
-            .bind(actor_url)
-            .bind(inbox_url)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO followers (user_id, actor_id, inbox_url, accepted) \
+             VALUES ($1,$2,$3,TRUE)",
+        )
+        .bind(state.owner_user_id)
+        .bind(actor_url)
+        .bind(inbox_url)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let activity = make_undo_follow_activity(
             "https://remote.example/undo/1",
@@ -1037,6 +1047,7 @@ mod tests {
         insert_test_actor(&pool, actor_url, inbox_url).await;
         insert_test_post(
             &pool,
+            state.owner_user_id,
             post_id,
             "https://blog.example.com/delete",
             &ap_note_id,

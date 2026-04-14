@@ -144,7 +144,7 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
     let mut actor: RemoteActor = fetch_ap_object(
         url,
         &state.http,
-        &state.key.private_key,
+        &state.owner_key.private_key,
         &state.config.key_id(),
     )
     .await?;
@@ -161,7 +161,7 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
         actor = fetch_ap_object(
             &actor.id.clone(),
             &state.http,
-            &state.key.private_key,
+            &state.owner_key.private_key,
             &state.config.key_id(),
         )
         .await?;
@@ -198,7 +198,7 @@ pub async fn fetch_note(url: &str, state: &AppState) -> AppResult<serde_json::Va
     fetch_ap_object(
         url,
         &state.http,
-        &state.key.private_key,
+        &state.owner_key.private_key,
         &state.config.key_id(),
     )
     .await

@@ -45,11 +45,14 @@ pub async fn publish_post_note(
     });
 
     // Persist before delivery so inReplyTo matching works immediately
-    sqlx::query("UPDATE posts SET ap_note_id = $1, updated_at = NOW() WHERE id = $2")
-        .bind(&note_id)
-        .bind(post_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE posts SET ap_note_id = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3",
+    )
+    .bind(&note_id)
+    .bind(post_id)
+    .bind(state.owner_user_id)
+    .execute(&state.db)
+    .await?;
 
     fan_out(state, activity).await;
     Ok(note_id)
@@ -159,9 +162,15 @@ fn now_str() -> String {
 // ── Fan-out delivery ──────────────────────────────────────────────────────────
 
 async fn fan_out(state: &AppState, activity: serde_json::Value) {
+    // shared_inbox_url lives on actor_cache (from the remote actor doc), not
+    // on followers; LEFT JOIN lets us prefer the shared inbox when available.
     let inboxes: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT COALESCE(shared_inbox_url, inbox_url) FROM followers WHERE accepted = TRUE",
+        "SELECT DISTINCT COALESCE(a.shared_inbox_url, f.inbox_url) \
+         FROM followers f \
+         LEFT JOIN actor_cache a ON a.id = f.actor_id \
+         WHERE f.user_id = $1 AND f.accepted = TRUE",
     )
+    .bind(state.owner_user_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -218,7 +227,7 @@ async fn deliver_one(
         &path,
         &host,
         Some(body),
-        &state.key.private_key,
+        &state.owner_key.private_key,
         &state.config.key_id(),
     )?;
 

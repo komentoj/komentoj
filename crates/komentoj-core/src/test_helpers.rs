@@ -15,8 +15,9 @@ use crate::{
     config::{
         AdminConfig, Config, CorsConfig, DatabaseConfig, InstanceConfig, RedisConfig, ServerConfig,
     },
-    state::{AppState, InstanceKey},
+    state::{AppState, UserKey},
 };
+use uuid::Uuid;
 use deadpool_redis::{Config as PoolConfig, Runtime};
 use reqwest::Client;
 use rsa::pkcs8::{EncodePublicKey, LineEnding};
@@ -252,7 +253,32 @@ pub async fn make_test_state(pool: PgPool, domain: &str) -> AppState {
         .expect("redis pool creation");
 
     let key = test_key();
-    let instance_key = InstanceKey {
+
+    // Seed the test user row so fk constraints are satisfied; use a stable UUID
+    // so tests can reason about IDs if they want to.
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (username, display_name) VALUES ($1, $1) \
+         ON CONFLICT (username) DO UPDATE SET updated_at = NOW() RETURNING id",
+    )
+    .bind(&config.instance.username)
+    .fetch_one(&pool)
+    .await
+    .expect("insert test user");
+
+    sqlx::query(
+        "INSERT INTO user_keys (user_id, private_key_pem, public_key_pem) \
+         VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind("")
+    .bind(&key.public_key_pem)
+    .execute(&pool)
+    .await
+    .expect("insert test user_keys");
+
+    let owner_key = UserKey {
+        user_id,
+        username: config.instance.username.clone(),
         private_key: Arc::new(key.private_key.clone()),
         public_key: Arc::new(key.public_key.clone()),
         public_key_pem: key.public_key_pem.clone(),
@@ -262,7 +288,8 @@ pub async fn make_test_state(pool: PgPool, domain: &str) -> AppState {
         config: Arc::new(config),
         db: pool,
         redis,
-        key: Arc::new(instance_key),
+        owner_user_id: user_id,
+        owner_key: Arc::new(owner_key),
         http: Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -318,16 +345,23 @@ pub async fn insert_test_actor(pool: &PgPool, actor_url: &str, inbox_url: &str) 
     .expect("insert_test_actor failed");
 }
 
-/// Insert a post into the `posts` table.
-pub async fn insert_test_post(pool: &PgPool, post_id: &str, url: &str, ap_note_id: &str) {
+/// Insert a post into the `posts` table, owned by `user_id`.
+pub async fn insert_test_post(
+    pool: &PgPool,
+    user_id: Uuid,
+    post_id: &str,
+    url: &str,
+    ap_note_id: &str,
+) {
     sqlx::query(
         r#"
-        INSERT INTO posts (id, title, url, content, ap_note_id, active, registered_at, updated_at)
-        VALUES ($1, $2, $3, 'Test content', $4, TRUE, NOW(), NOW())
+        INSERT INTO posts (id, user_id, title, url, content, ap_note_id, active, registered_at, updated_at)
+        VALUES ($1, $2, $3, $4, 'Test content', $5, TRUE, NOW(), NOW())
         ON CONFLICT (id) DO NOTHING
         "#,
     )
     .bind(post_id)
+    .bind(user_id)
     .bind("Test Post")
     .bind(url)
     .bind(ap_note_id)

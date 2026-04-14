@@ -122,17 +122,22 @@ pub async fn sync_posts(
                 DateTime<Utc>,
             ),
         >(
-            "SELECT title, url, content, ap_note_id, registered_at FROM posts WHERE id = $1",
+            "SELECT title, url, content, ap_note_id, registered_at \
+             FROM posts WHERE id = $1 AND user_id = $2",
         )
         .bind(&post.id)
+        .bind(state.owner_user_id)
         .fetch_optional(&state.db)
         .await?;
 
-        // Upsert
+        // Upsert. posts.id is a globally-unique slug PK today, so in OSS
+        // single-actor deployments the sync is per-user anyway. When we add
+        // per-user routes in a later phase we'll repin the PK to (user_id, id)
+        // to allow multiple users to reuse the same slug.
         sqlx::query(
             r#"
-            INSERT INTO posts (id, title, url, content, active, registered_at, updated_at)
-            VALUES ($1, $2, $3, $4, TRUE, NOW(), NOW())
+            INSERT INTO posts (id, user_id, title, url, content, active, registered_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
             ON CONFLICT (id) DO UPDATE SET
                 title      = EXCLUDED.title,
                 url        = EXCLUDED.url,
@@ -142,6 +147,7 @@ pub async fn sync_posts(
             "#,
         )
         .bind(&post.id)
+        .bind(state.owner_user_id)
         .bind(&post.title)
         .bind(&post.url)
         .bind(&post.content)
@@ -191,17 +197,22 @@ pub async fn sync_posts(
     let deactivated = if !valid_ids.is_empty() {
         sqlx::query(
             "UPDATE posts SET active = FALSE, updated_at = NOW() \
-             WHERE active = TRUE AND id != ALL($1)",
+             WHERE user_id = $1 AND active = TRUE AND id != ALL($2)",
         )
+        .bind(state.owner_user_id)
         .bind(&valid_ids)
         .execute(&state.db)
         .await?
         .rows_affected() as usize
     } else {
-        sqlx::query("UPDATE posts SET active = FALSE, updated_at = NOW() WHERE active = TRUE")
-            .execute(&state.db)
-            .await?
-            .rows_affected() as usize
+        sqlx::query(
+            "UPDATE posts SET active = FALSE, updated_at = NOW() \
+             WHERE user_id = $1 AND active = TRUE",
+        )
+        .bind(state.owner_user_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected() as usize
     };
 
     for action in actions {

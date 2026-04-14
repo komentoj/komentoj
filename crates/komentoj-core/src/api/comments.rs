@@ -90,12 +90,15 @@ pub async fn get_comments(
         return Err(AppError::BadRequest("id must not be empty".into()));
     }
 
-    // Verify the post exists
-    let exists: bool =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1)")
-            .bind(&post_id)
-            .fetch_one(&state.db)
-            .await?;
+    // Verify the post exists (scoped to the OSS owner user; SaaS will override
+    // via path param in a later phase)
+    let exists: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM posts WHERE id = $1 AND user_id = $2)",
+    )
+    .bind(&post_id)
+    .bind(state.owner_user_id)
+    .fetch_one(&state.db)
+    .await?;
 
     if !exists {
         return Err(AppError::NotFound);
