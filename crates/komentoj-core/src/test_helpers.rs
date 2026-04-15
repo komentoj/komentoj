@@ -63,12 +63,14 @@ pub fn test_key() -> &'static TestKeyPair {
 /// The domain of the *local* komentoj instance under test.
 pub const TEST_DOMAIN: &str = "test.example";
 
+/// The owner user's actor URL in tests (matches make_test_state's default).
 pub fn our_actor_url() -> String {
-    format!("https://{}/actor", TEST_DOMAIN)
+    format!("https://{}/users/komentoj", TEST_DOMAIN)
 }
 
+#[allow(dead_code)]
 pub fn our_key_id() -> String {
-    format!("https://{}/actor#main-key", TEST_DOMAIN)
+    format!("https://{}/users/komentoj#main-key", TEST_DOMAIN)
 }
 
 // ── AP JSON fixture builders ──────────────────────────────────────────────────
@@ -174,15 +176,27 @@ pub fn make_undo_follow_activity(
 
 // ── Signed request header builder ────────────────────────────────────────────
 
-/// Build a `HashMap` of lowercase HTTP headers for a signed POST /inbox
-/// request, ready to be passed directly to `handle_inbox`.
+/// Build a `HashMap` of lowercase HTTP headers for a signed POST inbox
+/// request. The default path is `/users/komentoj/inbox` to match
+/// `make_test_state`'s owner; use `signed_inbox_headers_for_path` to sign
+/// for a different path.
 pub fn signed_inbox_headers(
     body: &[u8],
     key: &TestKeyPair,
     key_id: &str,
     host: &str,
 ) -> HashMap<String, String> {
-    let sig = sign_request("post", "/inbox", host, Some(body), &key.private_key, key_id)
+    signed_inbox_headers_for_path(body, key, key_id, host, "/users/komentoj/inbox")
+}
+
+pub fn signed_inbox_headers_for_path(
+    body: &[u8],
+    key: &TestKeyPair,
+    key_id: &str,
+    host: &str,
+    path: &str,
+) -> HashMap<String, String> {
+    let sig = sign_request("post", path, host, Some(body), &key.private_key, key_id)
         .expect("sign_request failed");
 
     let mut h = HashMap::new();
@@ -194,17 +208,28 @@ pub fn signed_inbox_headers(
     h
 }
 
-/// Convenience wrapper for tests: run `handle_inbox` with the configured
-/// owner as the target user and the legacy `/inbox` path. Matches the shape
-/// tests used before the per-user refactor.
-pub async fn handle_inbox_as_owner(
+/// Convenience wrapper for tests: resolve the configured owner user and
+/// call `handle_inbox` against `/users/{owner}/inbox`.
+pub async fn handle_inbox_for_owner(
     state: crate::state::AppState,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> crate::error::AppResult<()> {
     let username = state.owner_key.username.clone();
     let target = state.find_user(&username).await?;
-    crate::ap::inbox::handle_inbox(state, target, "/inbox", headers, body).await
+    let path = format!("/users/{username}/inbox");
+    crate::ap::inbox::handle_inbox(state, target, &path, headers, body).await
+}
+
+/// The canonical inbox path for the configured owner, used by tests when
+/// signing requests that target `/users/{owner}/inbox`.
+pub fn owner_inbox_path(state: &crate::state::AppState) -> String {
+    format!("/users/{}/inbox", state.owner_key.username)
+}
+
+/// The canonical actor URL for the configured owner in tests.
+pub fn owner_actor_url(state: &crate::state::AppState) -> String {
+    state.config.user_actor_url(&state.owner_key.username)
 }
 
 /// Convert a `HashMap<String,String>` of lowercase header names to an

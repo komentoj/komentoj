@@ -1,10 +1,6 @@
 //! REST API consumed by the static blog frontend.
 //!
-//! Endpoints:
-//!   GET /api/v1/comments?id=<post_id>[&before=<iso8601>][&limit=<n>]
-//!     Legacy single-actor alias — returns comments on the owner's posts.
-//!   GET /api/v1/users/:username/comments?id=...
-//!     Per-user comments for any registered local user.
+//!   GET /api/v1/users/:username/comments?id=<post_id>[&before=<iso8601>][&limit=<n>]
 
 use crate::{
     error::{AppError, AppResult},
@@ -84,18 +80,9 @@ pub struct Attachment {
     pub blurhash: Option<String>,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Legacy: GET /api/v1/comments — returns comments for the owner's posts.
-pub async fn get_comments(
-    State(state): State<AppState>,
-    Query(q): Query<CommentsQuery>,
-) -> AppResult<Json<CommentsResponse>> {
-    let owner_id = state.owner_user_id;
-    list_comments(&state, owner_id, q).await.map(Json)
-}
-
-/// Per-user: GET /api/v1/users/:username/comments
+/// GET /api/v1/users/:username/comments
 pub async fn get_comments_for_user(
     State(state): State<AppState>,
     Path(username): Path<String>,

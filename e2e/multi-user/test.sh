@@ -18,6 +18,7 @@ set -euo pipefail
 
 KOMENTOJ="http://127.0.0.1:18080"
 ADMIN_TOKEN="e2e-multi-user-admin-token"
+OWNER="comments"
 
 PASS=0
 FAIL=0
@@ -63,19 +64,25 @@ section "0. komentoj reachable"
 wait_for "komentoj responds to /.well-known/webfinger" 60 \
     'curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:comments@komentoj.local"'
 
-# ── 1. Legacy /actor still works (owner user) ────────────────────────────────
+# ── 1. Owner-user actor exists (bootstrap created it) ───────────────────────
 
-section "1. Legacy single-actor surface"
+section "1. Owner actor bootstrapped"
 
-ACTOR=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/actor")
-assert_contains "legacy /actor type=Service"    "$ACTOR" '"type":"Service"'
-assert_contains "legacy /actor has publicKey"   "$ACTOR" '"publicKey"'
-assert_contains "legacy /actor has inbox"       "$ACTOR" '"inbox"'
+OWNER_ACTOR=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/users/$OWNER")
+assert_contains "owner actor type=Service"    "$OWNER_ACTOR" '"type":"Service"'
+assert_contains "owner actor has publicKey"   "$OWNER_ACTOR" '"publicKey"'
+assert_contains "owner actor id ends with /users/<owner>" "$OWNER_ACTOR" "/users/$OWNER\""
 
-# The legacy /actor should now point to the per-user URL under the hood;
-# follow the `id` to confirm it matches /users/<owner>.
-OWNER_ID=$(echo "$ACTOR" | grep -oP '"id":"\K[^"]+' | head -1)
-assert_contains "legacy /actor redirects to /users/<owner>" "$OWNER_ID" "/users/"
+# Legacy /actor should be gone entirely → 404
+assert_http "legacy /actor removed → 404" 404 \
+    -H "Accept: application/activity+json" "$KOMENTOJ/actor"
+assert_http "legacy /inbox removed → 404" 404 \
+    -X POST -H "Content-Type: application/activity+json" -d '{}' "$KOMENTOJ/inbox"
+assert_http "legacy /api/v1/comments removed → 404" 404 \
+    "$KOMENTOJ/api/v1/comments?id=x"
+assert_http "legacy /api/v1/posts/sync removed → 404" 404 \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d '{"posts":[]}' "$KOMENTOJ/api/v1/posts/sync"
 
 # ── 2. Admin: create a new user ──────────────────────────────────────────────
 
@@ -202,7 +209,7 @@ assert_http "alice actor now 404" 404 \
 
 # Refuse to delete owner
 assert_http "delete owner → 400" 400 \
-    -X DELETE "$KOMENTOJ/api/v1/admin/users/comments" \
+    -X DELETE "$KOMENTOJ/api/v1/admin/users/$OWNER" \
     -H "Authorization: Bearer $ADMIN_TOKEN"
 
 # ── Summary ──────────────────────────────────────────────────────────────────

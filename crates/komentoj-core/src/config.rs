@@ -80,36 +80,7 @@ impl Config {
         format!("{}://{}", self.instance.protocol, self.instance.domain)
     }
 
-    // ── Legacy single-actor URLs (delegate to the configured owner user) ─────
-    //
-    // These keep the pre-multi-user URL scheme alive for backward compatibility
-    // with blogs that hard-coded /actor, /inbox, /notes/:id, etc. They always
-    // resolve to `config.instance.username`.
-
-    /// Canonical actor URL for the configured owner: {base}/actor
-    pub fn actor_url(&self) -> String {
-        format!("{}/actor", self.base_url())
-    }
-
-    /// Canonical key ID for the configured owner: {base}/actor#main-key
-    pub fn key_id(&self) -> String {
-        format!("{}/actor#main-key", self.base_url())
-    }
-
-    /// Inbox URL for the configured owner: {base}/inbox
-    pub fn inbox_url(&self) -> String {
-        format!("{}/inbox", self.base_url())
-    }
-
-    /// acct: URI for the configured owner
-    pub fn acct(&self) -> String {
-        self.user_acct(&self.instance.username)
-    }
-
     // ── Per-user URLs (Mastodon-style /users/:username/…) ───────────────────
-    //
-    // These are the canonical multi-user URLs. The legacy helpers above are
-    // kept as conveniences for the owner user.
 
     /// Actor URL: {base}/users/{username}
     pub fn user_actor_url(&self, username: &str) -> String {
@@ -214,17 +185,30 @@ token = "secret-token"
     }
 
     #[test]
-    fn actor_url_format() {
+    fn per_user_urls_format() {
         let cfg = load_toml(VALID_TOML).unwrap();
-        assert_eq!(cfg.actor_url(), "https://example.com/actor");
-        assert_eq!(cfg.key_id(), "https://example.com/actor#main-key");
-        assert_eq!(cfg.inbox_url(), "https://example.com/inbox");
+        assert_eq!(
+            cfg.user_actor_url("alice"),
+            "https://example.com/users/alice"
+        );
+        assert_eq!(
+            cfg.user_key_id("alice"),
+            "https://example.com/users/alice#main-key"
+        );
+        assert_eq!(
+            cfg.user_inbox_url("alice"),
+            "https://example.com/users/alice/inbox"
+        );
+        assert_eq!(
+            cfg.user_note_url("alice", "abc"),
+            "https://example.com/users/alice/notes/abc"
+        );
     }
 
     #[test]
     fn acct_format() {
         let cfg = load_toml(VALID_TOML).unwrap();
-        assert_eq!(cfg.acct(), "acct:komentoj@example.com");
+        assert_eq!(cfg.user_acct("komentoj"), "acct:komentoj@example.com");
     }
 
     #[test]

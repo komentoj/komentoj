@@ -44,20 +44,6 @@ use std::collections::HashMap;
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Legacy single-actor inbox: `POST /inbox` → target = owner user.
-pub async fn inbox_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let username = state.owner_key.username.clone();
-    let target = match state.find_user(&username).await {
-        Ok(u) => u,
-        Err(e) => return map_inbox_error(e),
-    };
-    map_inbox_result(handle_inbox(state, target, "/inbox", headers, body).await)
-}
-
 /// Per-user inbox: `POST /users/:username/inbox`.
 pub async fn user_inbox_handler(
     State(state): State<AppState>,
@@ -413,15 +399,10 @@ async fn handle_follow(
 ) -> anyhow::Result<()> {
     // Reject Follow activities not directed at the target actor. A Follow of
     // `/users/alice` delivered to alice's inbox is valid; a Follow of
-    // `/users/bob` delivered to alice's inbox is not. The legacy `/actor` URL
-    // is accepted as an alias when target == owner.
+    // `/users/bob` delivered to alice's inbox is not.
     let target_actor = state.config.user_actor_url(&target.username);
-    let legacy_actor = state.config.actor_url();
     let object_id = activity.object.as_ref().map(object_id_from_value);
-    let oid = object_id.as_deref();
-    let is_target = oid == Some(target_actor.as_str());
-    let is_legacy = oid == Some(legacy_actor.as_str()) && target.id == state.owner_user_id;
-    if !(is_target || is_legacy) {
+    if object_id.as_deref() != Some(target_actor.as_str()) {
         tracing::debug!(
             "Follow: object {:?} does not match target actor {}, ignoring",
             object_id,
@@ -822,7 +803,7 @@ mod tests {
         let body = Bytes::from(b"{}".to_vec());
         let headers = HeaderMap::new(); // no Signature header
 
-        let result = crate::test_helpers::handle_inbox_as_owner(state, headers, body).await;
+        let result = crate::test_helpers::handle_inbox_for_owner(state, headers, body).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -850,7 +831,7 @@ mod tests {
             "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into(),
         );
 
-        let result = crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -875,7 +856,7 @@ mod tests {
         let key_id = format!("{}#main-key", alice_url); // ← signed by alice
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        let result = crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -904,25 +885,26 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
-        // Wait for background task to finish
-        wait_for(Duration::from_secs(2), || async {
-            let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
-                    .bind(actor_url)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap_or(0);
-            count == 1
+        // Wait for the Accept to land on the mock inbox. The handler first
+        // INSERTs the follower then awaits the outbound POST, so polling on
+        // the DB row alone can win the race before the HTTP request flushes;
+        // waiting on the mock server is the real post-condition.
+        wait_for(Duration::from_secs(3), || async {
+            !mock_server.received_requests().await.unwrap_or_default().is_empty()
         })
         .await;
 
-        // Accept was delivered to the mock inbox
-        let received = mock_server.received_requests().await.unwrap();
-        assert!(!received.is_empty(), "Accept should have been delivered");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+                .bind(actor_url)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+        assert_eq!(count, 1, "follower should be persisted");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -944,7 +926,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox should return Ok (activity is ignored, not rejected)");
 
@@ -986,7 +968,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
@@ -1038,7 +1020,7 @@ mod tests {
         // Send the same activity twice
         for _ in 0..2 {
             let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
-            crate::test_helpers::handle_inbox_as_owner(
+            crate::test_helpers::handle_inbox_for_owner(
                 make_test_state(pool.clone(), TEST_DOMAIN).await,
                 header_map(&headers),
                 Bytes::from(body_bytes.clone()),
@@ -1091,7 +1073,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 
@@ -1149,7 +1131,7 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_as_owner(state, header_map(&headers), Bytes::from(body_bytes))
+        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
             .await
             .expect("inbox handle failed");
 

@@ -1,9 +1,5 @@
 //! Post registration + auto-publish / auto-update API.
 //!
-//! Endpoints:
-//!   POST /api/v1/posts/sync
-//!     Legacy single-actor alias — operates on config.instance.username.
-//!
 //!   POST /api/v1/users/:username/posts/sync
 //!     Per-user sync. Authenticated either by the global admin token or by
 //!     the user's own `api_token` (users.api_token). The SaaS layer replaces
@@ -70,24 +66,10 @@ pub struct RejectedPost {
     pub reason: String,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Legacy: POST /api/v1/posts/sync — operates on the configured owner.
-pub async fn sync_posts(
-    State(state): State<AppState>,
-    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
-    Json(body): Json<SyncRequest>,
-) -> AppResult<Json<SyncResponse>> {
-    // Admin token only, for backward compatibility.
-    if !constant_time_eq(bearer.token(), &state.config.admin.token) {
-        return Err(AppError::Unauthorized("invalid admin token".into()));
-    }
-    let user = state.load_user_key(state.owner_user_id).await?;
-    run_sync(&state, &user, body).await.map(Json)
-}
-
-/// Per-user: POST /api/v1/users/:username/posts/sync — admin token OR the
-/// user's own api_token (stored in `users.api_token`).
+/// POST /api/v1/users/:username/posts/sync — admin token OR the user's own
+/// api_token (stored in `users.api_token`).
 pub async fn sync_posts_for_user(
     State(state): State<AppState>,
     Path(username): Path<String>,

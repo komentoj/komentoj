@@ -134,7 +134,7 @@ section "2. WebFinger"
 
 WF_K=$(curl -sf "$KOMENTOJ/.well-known/webfinger?resource=acct:komentoj@komentoj.local")
 assert_contains "komentoj WF subject"           "$WF_K" "acct:komentoj@komentoj.local"
-assert_contains "komentoj WF actor link"        "$WF_K" "https://komentoj.local/actor"
+assert_contains "komentoj WF actor link"        "$WF_K" "https://komentoj.local/users/comments"
 assert_contains "komentoj WF content-type link" "$WF_K" "application/activity+json"
 
 WF_M=$(curl -sf "$MASTODON/.well-known/webfinger?resource=acct:$MASTO_USER@mastodon.local")
@@ -144,15 +144,15 @@ assert_contains "Mastodon WF subject" "$WF_M" "acct:$MASTO_USER@mastodon.local"
 
 section "3. Actor documents"
 
-ACTOR=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/actor")
+ACTOR=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/users/comments")
 assert_contains "komentoj actor type=Service"  "$ACTOR" '"type":"Service"'
-assert_contains "komentoj actor inbox"         "$ACTOR" '"inbox":"https://komentoj.local/inbox"'
+assert_contains "komentoj actor inbox"         "$ACTOR" '"inbox":"https://komentoj.local/users/comments/inbox"'
 assert_contains "komentoj actor publicKey"     "$ACTOR" '"publicKey"'
 assert_contains "komentoj actor followers"     "$ACTOR" '"followers"'
 
-assert_http "komentoj outbox OK"    200 -H "Accept: application/activity+json" "$KOMENTOJ/outbox"
-assert_http "komentoj followers OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/followers"
-assert_http "komentoj following OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/following"
+assert_http "komentoj outbox OK"    200 -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/outbox"
+assert_http "komentoj followers OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/followers"
+assert_http "komentoj following OK" 200 -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/following"
 
 # Verify Mastodon account exists
 MASTO_ACCOUNT=$(curl -sf -H "Authorization: Bearer $MASTO_TOKEN" \
@@ -163,18 +163,18 @@ assert_contains "Mastodon account exists" "$MASTO_ACCOUNT" '"acct"'
 
 section "4. Actor content negotiation"
 
-REDIR=$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: text/html" "$KOMENTOJ/actor")
+REDIR=$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: text/html" "$KOMENTOJ/users/comments")
 if [[ "$REDIR" == "303" ]]; then ok "actor redirects browsers (303)"
 else fail "actor browser redirect — got HTTP $REDIR, want 303"; fi
 
 # ── 5. sync_posts: register + publish Create(Note) ──────────────────────────
 
-section "5. POST /api/v1/posts/sync — new post → Create(Note)"
+section "5. POST /api/v1/users/comments/posts/sync — new post → Create(Note)"
 
 POST_ID="e2e-post-$(date +%s)"
 POST_URL="https://mastodon.local/posts/$POST_ID"
 
-SYNC1=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
+SYNC1=$(curl -sf -X POST "$KOMENTOJ/api/v1/users/comments/posts/sync" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"posts\":[{\"id\":\"$POST_ID\",\"title\":\"E2E Test Post\",\"url\":\"$POST_URL\",\"content\":\"Hello from E2E.\"}]}")
@@ -184,9 +184,9 @@ assert_contains "sync: published=1" "$SYNC1" '"published":1'
 assert_contains "sync: updated=0"   "$SYNC1" '"updated":0'
 
 wait_for "ap_note_id persisted in DB" 30 \
-    'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qF "total"'
+    'curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID" | grep -qF "total"'
 
-COMMENTS0=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
+COMMENTS0=$(curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID")
 assert_contains "comments post_id matches" "$COMMENTS0" "\"post_id\":\"$POST_ID\""
 
 # Capture the komentoj AP Note URL now; used in §8 for inReplyTo delivery.
@@ -252,9 +252,9 @@ if [[ -n "$KOMENTOJ_MASTO_ID" ]]; then
     ok "Mastodon sent Follow activity"
 
     wait_for "komentoj followers count ≥ 1" 30 \
-        'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers" | grep -P "\"totalItems\":[1-9]"'
+        'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/followers" | grep -P "\"totalItems\":[1-9]"'
 
-    FOLLOWERS=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers")
+    FOLLOWERS=$(curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/followers")
     assert_contains "followers totalItems ≥ 1" "$FOLLOWERS" '"totalItems"'
 
     wait_for "Mastodon sees relationship as following" 30 \
@@ -296,9 +296,9 @@ else
         ok "Mastodon status posted (id=$MASTO_STATUS_ID)"
 
         wait_for "comment stored in komentoj" 30 \
-            'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qP "\"total\":[1-9]"'
+            'curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID" | grep -qP "\"total\":[1-9]"'
 
-        COMMENTS1=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
+        COMMENTS1=$(curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID")
         assert_contains "comment has author field"   "$COMMENTS1" '"author"'
         assert_contains "comment has content_html"   "$COMMENTS1" '"content_html"'
         assert_contains "comments has replies field" "$COMMENTS1" '"replies"'
@@ -309,9 +309,9 @@ fi
 
 # ── 9. sync_posts: Update(Note) on content change ────────────────────────────
 
-section "9. POST /api/v1/posts/sync — updated post → Update(Note)"
+section "9. POST /api/v1/users/comments/posts/sync — updated post → Update(Note)"
 
-SYNC2=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
+SYNC2=$(curl -sf -X POST "$KOMENTOJ/api/v1/users/comments/posts/sync" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"posts\":[{\"id\":\"$POST_ID\",\"title\":\"E2E Test Post (updated)\",\"url\":\"$POST_URL\",\"content\":\"Updated content.\"}]}")
@@ -324,12 +324,12 @@ assert_contains "update sync: published=0" "$SYNC2" '"published":0'
 
 section "10. GET /notes/{id}"
 
-NOTE_RESP=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID")
-NOTE_ID_FROM_COMMENTS=$(echo "$NOTE_RESP" | grep -oP '"id":"https://komentoj\.local/notes/\K[^"]+' | head -1 || true)
+NOTE_RESP=$(curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID")
+NOTE_ID_FROM_COMMENTS=$(echo "$NOTE_RESP" | grep -oP '"id":"https://komentoj\.local/users/comments/notes/\K[^"]+' | head -1 || true)
 
 if [[ -n "$NOTE_ID_FROM_COMMENTS" ]]; then
     NOTE_DOC=$(curl -sf -H "Accept: application/activity+json" \
-        "$KOMENTOJ/notes/$NOTE_ID_FROM_COMMENTS" || true)
+        "$KOMENTOJ/users/comments/notes/$NOTE_ID_FROM_COMMENTS" || true)
     assert_contains "Note doc type=Note"    "$NOTE_DOC" '"type":"Note"'
     assert_contains "Note doc attributedTo" "$NOTE_DOC" '"attributedTo"'
     assert_contains "Note doc content"      "$NOTE_DOC" '"content"'
@@ -339,9 +339,9 @@ fi
 
 # ── 11. sync_posts: deactivate post (absent from list) ───────────────────────
 
-section "11. POST /api/v1/posts/sync — empty list → all posts deactivated"
+section "11. POST /api/v1/users/comments/posts/sync — empty list → all posts deactivated"
 
-SYNC3=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
+SYNC3=$(curl -sf -X POST "$KOMENTOJ/api/v1/users/comments/posts/sync" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"posts":[]}')
@@ -351,7 +351,7 @@ if (( DEACT >= 1 )); then ok "deactivated ≥ 1 posts ($DEACT)"
 else fail "expected deactivated ≥ 1, got $DEACT — sync response: $SYNC3"; fi
 
 assert_http "comments still readable after deactivation" 200 \
-    "$KOMENTOJ/api/v1/comments?id=$POST_ID"
+    "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID"
 
 # ── 12. Incoming Update(Note) from Mastodon ──────────────────────────────────
 
@@ -381,7 +381,7 @@ if [[ -n "$MASTO_STATUS_ID" ]]; then
     sleep 3
 
     wait_for "comment soft-deleted in komentoj" 30 \
-        'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST_ID" | grep -qP "\"total\":0"'
+        'curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST_ID" | grep -qP "\"total\":0"'
 fi
 
 # ── 14. Undo(Follow): Mastodon unfollows komentoj ────────────────────────────
@@ -394,7 +394,7 @@ if [[ -n "$KOMENTOJ_MASTO_ID" ]]; then
     ok "Mastodon unfollow sent"
 
     wait_for "komentoj followers count returns to 0" 30 \
-        'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/followers" | grep -qF "\"totalItems\":0"'
+        'curl -sf -H "Accept: application/activity+json" "$KOMENTOJ/users/comments/followers" | grep -qF "\"totalItems\":0"'
 fi
 
 # ── 15. Image/file attachment round-trip ─────────────────────────────────────
@@ -407,7 +407,7 @@ section "15. Image attachment round-trip"
 # Re-sync a fresh post (previous was deactivated in §11)
 POST2_ID="e2e-attach-$(date +%s)"
 POST2_URL="https://mastodon.local/posts/$POST2_ID"
-SYNC_ATTACH=$(curl -sf -X POST "$KOMENTOJ/api/v1/posts/sync" \
+SYNC_ATTACH=$(curl -sf -X POST "$KOMENTOJ/api/v1/users/comments/posts/sync" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"posts\":[{\"id\":\"$POST2_ID\",\"title\":\"Attach Test\",\"url\":\"$POST2_URL\",\"content\":\"Attachment test.\"}]}")
@@ -480,9 +480,9 @@ if [[ -n "$MEDIA_ID" ]]; then
         ok "Mastodon status with attachment posted (id=$ATTACH_STATUS_ID)"
 
         wait_for "comment with attachment stored in komentoj" 30 \
-            'curl -sf "$KOMENTOJ/api/v1/comments?id=$POST2_ID" | grep -qP "\"total\":[1-9]"'
+            'curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST2_ID" | grep -qP "\"total\":[1-9]"'
 
-        ATTACH_COMMENTS=$(curl -sf "$KOMENTOJ/api/v1/comments?id=$POST2_ID")
+        ATTACH_COMMENTS=$(curl -sf "$KOMENTOJ/api/v1/users/comments/comments?id=$POST2_ID")
         assert_contains "attachment comment received"  "$ATTACH_COMMENTS" '"attachments"'
         assert_contains "attachment has url field"     "$ATTACH_COMMENTS" '"url"'
         assert_contains "attachment has media_type"    "$ATTACH_COMMENTS" '"media_type"'
@@ -498,15 +498,15 @@ fi
 
 section "16. API error handling"
 
-assert_http "comments: missing id → 400" 400 "$KOMENTOJ/api/v1/comments"
-assert_http "comments: unknown id → 404" 404 "$KOMENTOJ/api/v1/comments?id=__nonexistent__"
+assert_http "comments: missing id → 400" 400 "$KOMENTOJ/api/v1/users/comments/comments"
+assert_http "comments: unknown id → 404" 404 "$KOMENTOJ/api/v1/users/comments/comments?id=__nonexistent__"
 assert_http "sync: wrong token → 401"    401 \
-    -X POST "$KOMENTOJ/api/v1/posts/sync" \
+    -X POST "$KOMENTOJ/api/v1/users/comments/posts/sync" \
     -H "Authorization: Bearer wrong-token" \
     -H "Content-Type: application/json" \
     -d '{"posts":[]}'
 assert_http "inbox: no signature → 401" 401 \
-    -X POST "$KOMENTOJ/inbox" \
+    -X POST "$KOMENTOJ/users/comments/inbox" \
     -H "Content-Type: application/activity+json" \
     -d '{"type":"Create"}'
 

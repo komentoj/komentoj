@@ -1,19 +1,11 @@
 //! Actor and WebFinger endpoints.
 //!
-//! Per-user routes (canonical):
 //!   GET /.well-known/webfinger?resource=acct:{username}@{domain}
 //!   GET /users/{username}
 //!   GET /users/{username}/outbox
 //!   GET /users/{username}/followers
 //!   GET /users/{username}/following
 //!   GET /users/{username}/notes/{note_uuid}
-//!
-//! Legacy single-actor aliases (resolve to `config.instance.username`):
-//!   GET /actor        → same as /users/{owner}
-//!   GET /outbox       → same as /users/{owner}/outbox
-//!   GET /followers    → same as /users/{owner}/followers
-//!   GET /following    → same as /users/{owner}/following
-//!   GET /notes/:id    → same as /users/{owner}/notes/:id
 
 use crate::{
     ap::types::{
@@ -47,16 +39,8 @@ pub async fn webfinger_handler(
         .resource
         .ok_or_else(|| AppError::BadRequest("missing resource parameter".into()))?;
 
-    // Accept "acct:username@domain" or the bare user actor URL.
-    // Also accept the legacy /actor URL → owner user.
+    // Accept "acct:username@domain" or the bare per-user actor URL.
     let username = parse_webfinger_resource(&resource, &state.config.instance.domain)
-        .or_else(|| {
-            if resource == state.config.actor_url() {
-                Some(state.owner_key.username.clone())
-            } else {
-                None
-            }
-        })
         .ok_or(AppError::NotFound)?;
 
     let user = state.find_user(&username).await?;
@@ -126,16 +110,6 @@ pub async fn user_actor_handler(
     serve_actor_document(&state, &user, &headers).await
 }
 
-/// Legacy alias: `/actor` → the configured owner's actor document.
-pub async fn actor_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> AppResult<Response> {
-    let username = state.owner_key.username.clone();
-    let user = state.find_user(&username).await?;
-    serve_actor_document(&state, &user, &headers).await
-}
-
 async fn serve_actor_document(
     state: &AppState,
     user: &LocalUser,
@@ -198,7 +172,7 @@ async fn serve_actor_document(
         .into_response())
 }
 
-// ── Outbox / following (per-user) ────────────────────────────────────────────
+// ── Per-user Outbox / Following (stub) ───────────────────────────────────────
 
 pub async fn user_outbox_handler(
     State(state): State<AppState>,
@@ -220,21 +194,6 @@ pub async fn user_outbox_handler(
         .into_response())
 }
 
-pub async fn outbox_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let base = state.config.base_url();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/activity+json")],
-        Json(serde_json::json!({
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("{base}/outbox"),
-            "type": "OrderedCollection",
-            "totalItems": 0,
-            "first": format!("{base}/outbox?page=1"),
-        })),
-    )
-}
-
 pub async fn user_following_handler(
     State(state): State<AppState>,
     Path(username): Path<String>,
@@ -254,21 +213,7 @@ pub async fn user_following_handler(
         .into_response())
 }
 
-pub async fn following_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let base = state.config.base_url();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/activity+json")],
-        Json(serde_json::json!({
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("{base}/following"),
-            "type": "OrderedCollection",
-            "totalItems": 0,
-        })),
-    )
-}
-
-// ── Followers (per-user, count only) ─────────────────────────────────────────
+// ── Per-user Followers (count only) ──────────────────────────────────────────
 
 pub async fn user_followers_handler(
     State(state): State<AppState>,
@@ -297,29 +242,7 @@ pub async fn user_followers_handler(
         .into_response())
 }
 
-pub async fn followers_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let base = state.config.base_url();
-    let count: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM followers WHERE user_id = $1 AND accepted = TRUE",
-    )
-    .bind(state.owner_user_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/activity+json")],
-        Json(serde_json::json!({
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "id": format!("{base}/followers"),
-            "type": "OrderedCollection",
-            "totalItems": count,
-        })),
-    )
-}
-
-// ── Note fetch endpoint ───────────────────────────────────────────────────────
+// ── Per-user Note ────────────────────────────────────────────────────────────
 
 /// GET /users/:username/notes/:note_uuid
 pub async fn user_note_handler(
@@ -328,40 +251,20 @@ pub async fn user_note_handler(
 ) -> AppResult<Response> {
     let user = state.find_user(&username).await?;
     let note_id = state.config.user_note_url(&username, &note_uuid);
-    serve_note(&state, &user, &note_id, &username).await
-}
 
-/// Legacy alias: `/notes/:id` → owner's note using the legacy `/notes/:id`
-/// canonical ID shape (preserves URLs of already-published notes).
-pub async fn note_handler(
-    State(state): State<AppState>,
-    Path(note_uuid): Path<String>,
-) -> AppResult<Response> {
-    let username = state.owner_key.username.clone();
-    let user = state.find_user(&username).await?;
-    let note_id = format!("{}/notes/{note_uuid}", state.config.base_url());
-    serve_note(&state, &user, &note_id, &username).await
-}
-
-async fn serve_note(
-    state: &AppState,
-    user: &LocalUser,
-    note_id: &str,
-    username: &str,
-) -> AppResult<Response> {
     let row = sqlx::query_as::<_, (Option<String>, String, String, DateTime<Utc>, DateTime<Utc>)>(
         "SELECT title, url, content, registered_at, updated_at \
          FROM posts WHERE ap_note_id = $1 AND user_id = $2 AND active = TRUE",
     )
-    .bind(note_id)
+    .bind(&note_id)
     .bind(user.id)
     .fetch_optional(&state.db)
     .await?;
 
     let (title, url, content_md, registered_at, updated_at) = row.ok_or(AppError::NotFound)?;
 
-    let actor_url = state.config.user_actor_url(username);
-    let followers_url = state.config.user_followers_url(username);
+    let actor_url = state.config.user_actor_url(&username);
+    let followers_url = state.config.user_followers_url(&username);
     let published_str = registered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let updated_str = updated_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 

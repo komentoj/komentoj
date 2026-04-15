@@ -145,7 +145,7 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
         url,
         &state.http,
         &state.owner_key.private_key,
-        &state.config.key_id(),
+        &state.config.user_key_id(&state.owner_key.username),
     )
     .await?;
 
@@ -162,7 +162,7 @@ pub async fn fetch_actor(url: &str, state: &AppState) -> AppResult<RemoteActor> 
             &actor.id.clone(),
             &state.http,
             &state.owner_key.private_key,
-            &state.config.key_id(),
+            &state.config.user_key_id(&state.owner_key.username),
         )
         .await?;
     }
@@ -199,7 +199,7 @@ pub async fn fetch_note(url: &str, state: &AppState) -> AppResult<serde_json::Va
         url,
         &state.http,
         &state.owner_key.private_key,
-        &state.config.key_id(),
+        &state.config.user_key_id(&state.owner_key.username),
     )
     .await
 }

@@ -19,16 +19,15 @@ pub use state::AppState;
 use crate::{
     ap::{
         actor::{
-            actor_handler, followers_handler, following_handler, note_handler, outbox_handler,
             user_actor_handler, user_followers_handler, user_following_handler, user_note_handler,
             user_outbox_handler, webfinger_handler,
         },
-        inbox::{inbox_handler, user_inbox_handler},
+        inbox::user_inbox_handler,
     },
     api::{
         admin::{create_user, delete_user, list_users},
-        comments::{get_comments, get_comments_for_user},
-        posts::{sync_posts, sync_posts_for_user},
+        comments::get_comments_for_user,
+        posts::sync_posts_for_user,
     },
 };
 use axum::{
@@ -67,7 +66,8 @@ pub fn build_router(state: AppState) -> Router {
         .allow_headers(AllowHeaders::any());
 
     Router::new()
-        // ── Per-user ActivityPub routes (canonical) ──────────────────────────
+        // ── ActivityPub: WebFinger + per-user routes ─────────────────────────
+        .route("/.well-known/webfinger", get(webfinger_handler))
         .route("/users/{username}", get(user_actor_handler))
         .route("/users/{username}/inbox", post(user_inbox_handler))
         .route("/users/{username}/outbox", get(user_outbox_handler))
@@ -77,22 +77,12 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{username}/notes/{note_uuid}",
             get(user_note_handler),
         )
-        // ── Legacy single-actor aliases (resolve to config.instance.username) ─
-        .route("/.well-known/webfinger", get(webfinger_handler))
-        .route("/actor", get(actor_handler))
-        .route("/inbox", post(inbox_handler))
-        .route("/outbox", get(outbox_handler))
-        .route("/followers", get(followers_handler))
-        .route("/following", get(following_handler))
-        .route("/notes/{id}", get(note_handler))
         // ── Public REST API for the blog frontend ────────────────────────────
-        .route("/api/v1/comments", get(get_comments))
         .route(
             "/api/v1/users/{username}/comments",
             get(get_comments_for_user),
         )
         // ── Write API (admin token OR per-user api_token) ────────────────────
-        .route("/api/v1/posts/sync", post(sync_posts))
         .route(
             "/api/v1/users/{username}/posts/sync",
             post(sync_posts_for_user),
