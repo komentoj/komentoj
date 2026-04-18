@@ -17,7 +17,6 @@ use crate::{
     },
     state::{AppState, UserKey},
 };
-use uuid::Uuid;
 use deadpool_redis::{Config as PoolConfig, Runtime};
 use reqwest::Client;
 use rsa::pkcs8::{EncodePublicKey, LineEnding};
@@ -28,6 +27,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::Duration,
 };
+use uuid::Uuid;
 
 // ── Singleton test RSA key ────────────────────────────────────────────────────
 

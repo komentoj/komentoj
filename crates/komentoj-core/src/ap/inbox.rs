@@ -160,6 +160,16 @@ pub(crate) async fn handle_inbox(
         return Ok(()); // duplicate
     }
 
+    // Probabilistic cleanup: ~1% of requests purge entries older than 30 days
+    // to prevent unbounded table growth.
+    if rand::random::<u8>() < 3 {
+        let _ = sqlx::query(
+            "DELETE FROM processed_activities WHERE created_at < NOW() - INTERVAL '30 days'",
+        )
+        .execute(&state.db)
+        .await;
+    }
+
     // Hand off to background task.
     // On failure we remove the activity from processed_activities so the remote
     // side can retry on its next delivery attempt.
@@ -477,10 +487,7 @@ async fn handle_undo(
             .bind(actor_id)
             .execute(&state.db)
             .await?;
-        tracing::info!(
-            "removed follower {actor_id} from @{}",
-            target.username
-        );
+        tracing::info!("removed follower {actor_id} from @{}", target.username);
     }
 
     Ok(())
@@ -529,14 +536,7 @@ async fn send_accept(
     };
     let key_id = state.config.user_key_id(&target.username);
 
-    let sig_headers = sign_request(
-        "post",
-        &path,
-        &host,
-        Some(&body),
-        &signing_key,
-        &key_id,
-    )?;
+    let sig_headers = sign_request("post", &path, &host, Some(&body), &signing_key, &key_id)?;
 
     let response = state
         .http
@@ -695,18 +695,11 @@ async fn get_cached_public_key_pem(state: &AppState, actor_url: &str) -> AppResu
 }
 
 /// Ensure the actor exists in our DB cache; fetch if not present.
+/// `fetch_actor` has its own three-level cache (Redis → DB → HTTP) so
+/// calling it unconditionally is cheap — at most one Redis GET.
 async fn ensure_actor_cached(state: &AppState, actor_url: &str) {
-    let exists: bool =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM actor_cache WHERE id = $1)")
-            .bind(actor_url)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(false);
-
-    if !exists {
-        if let Err(e) = fetch_actor(actor_url, state).await {
-            tracing::warn!("failed to cache actor {actor_url}: {e}");
-        }
+    if let Err(e) = fetch_actor(actor_url, state).await {
+        tracing::warn!("failed to cache actor {actor_url}: {e}");
     }
 }
 
@@ -831,7 +824,12 @@ mod tests {
             "keyId=\"fake\",headers=\"date\",signature=\"AAAA\"".into(),
         );
 
-        let result = crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -856,7 +854,12 @@ mod tests {
         let key_id = format!("{}#main-key", alice_url); // ← signed by alice
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        let result = crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes)).await;
+        let result = crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await;
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 
@@ -885,25 +888,32 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
-            .await
-            .expect("inbox handle failed");
+        crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await
+        .expect("inbox handle failed");
 
         // Wait for the Accept to land on the mock inbox. The handler first
         // INSERTs the follower then awaits the outbound POST, so polling on
         // the DB row alone can win the race before the HTTP request flushes;
         // waiting on the mock server is the real post-condition.
         wait_for(Duration::from_secs(3), || async {
-            !mock_server.received_requests().await.unwrap_or_default().is_empty()
+            !mock_server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
         })
         .await;
 
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
-                .bind(actor_url)
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM followers WHERE actor_id = $1")
+            .bind(actor_url)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
         assert_eq!(count, 1, "follower should be persisted");
     }
 
@@ -926,9 +936,13 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
-            .await
-            .expect("inbox should return Ok (activity is ignored, not rejected)");
+        crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await
+        .expect("inbox should return Ok (activity is ignored, not rejected)");
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -968,9 +982,13 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
-            .await
-            .expect("inbox handle failed");
+        crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await
+        .expect("inbox handle failed");
 
         wait_for(Duration::from_secs(2), || async {
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = $1")
@@ -1073,9 +1091,13 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
-            .await
-            .expect("inbox handle failed");
+        crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await
+        .expect("inbox handle failed");
 
         wait_for(Duration::from_secs(2), || async {
             let count: i64 =
@@ -1131,9 +1153,13 @@ mod tests {
         let key_id = format!("{}#main-key", actor_url);
         let headers = signed_inbox_headers(&body_bytes, key, &key_id, TEST_DOMAIN);
 
-        crate::test_helpers::handle_inbox_for_owner(state, header_map(&headers), Bytes::from(body_bytes))
-            .await
-            .expect("inbox handle failed");
+        crate::test_helpers::handle_inbox_for_owner(
+            state,
+            header_map(&headers),
+            Bytes::from(body_bytes),
+        )
+        .await
+        .expect("inbox handle failed");
 
         wait_for(Duration::from_secs(2), || async {
             let deleted_at: Option<chrono::DateTime<chrono::Utc>> =

@@ -140,6 +140,11 @@ pub async fn run_sync(
 
     let mut actions: Vec<Action> = Vec::new();
 
+    // Wrap the entire upsert + deactivate in a transaction so concurrent
+    // syncs for the same user are serialised and can't deactivate each
+    // other's posts or double-publish.
+    let mut tx = state.db.begin().await?;
+
     for post in body.posts {
         if post.id.is_empty() {
             rejected.push(RejectedPost {
@@ -149,7 +154,8 @@ pub async fn run_sync(
             continue;
         }
 
-        // Snapshot existing record before upsert
+        // Snapshot existing record before upsert.
+        // FOR UPDATE locks the row so a concurrent sync blocks here.
         let existing = sqlx::query_as::<
             _,
             (
@@ -161,16 +167,13 @@ pub async fn run_sync(
             ),
         >(
             "SELECT title, url, content, ap_note_id, registered_at \
-             FROM posts WHERE id = $1 AND user_id = $2",
+             FROM posts WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(&post.id)
         .bind(user.user_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        // Upsert. posts.id is a globally-unique slug PK today — multi-user
-        // deployments get cross-user collision rejection via the user_id
-        // guard in ON CONFLICT UPDATE.
         sqlx::query(
             r#"
             INSERT INTO posts (id, user_id, title, url, content, active, registered_at, updated_at)
@@ -189,7 +192,7 @@ pub async fn run_sync(
         .bind(&post.title)
         .bind(&post.url)
         .bind(&post.content)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
         upserted += 1;
@@ -230,7 +233,7 @@ pub async fn run_sync(
         actions.push(action);
     }
 
-    // Deactivate posts absent from this sync.
+    // Deactivate posts absent from this sync (inside the same transaction).
     let deactivated = if !valid_ids.is_empty() {
         sqlx::query(
             "UPDATE posts SET active = FALSE, updated_at = NOW() \
@@ -238,7 +241,7 @@ pub async fn run_sync(
         )
         .bind(user.user_id)
         .bind(&valid_ids)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected() as usize
     } else {
@@ -247,10 +250,12 @@ pub async fn run_sync(
              WHERE user_id = $1 AND active = TRUE",
         )
         .bind(user.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected() as usize
     };
+
+    tx.commit().await?;
 
     for action in actions {
         match action {

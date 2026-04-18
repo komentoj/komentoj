@@ -126,7 +126,8 @@ async fn load_or_bootstrap_owner(db: &PgPool, username: &str) -> Result<UserKey>
             .context("post-migration key lookup failed");
     }
 
-    // 3. fresh install: create a new user with a freshly generated keypair
+    // 3. fresh install: create a new user with a freshly generated keypair.
+    //    Use INSERT ... ON CONFLICT so parallel instance startups don't crash.
     tracing::info!("creating new local user @{username} with fresh 2048-bit RSA keypair…");
     let mut rng = rand::thread_rng();
     let private_key = RsaPrivateKey::new(&mut rng, 2048).context("generating RSA key")?;
@@ -141,35 +142,32 @@ async fn load_or_bootstrap_owner(db: &PgPool, username: &str) -> Result<UserKey>
         .to_public_key_pem(LineEnding::LF)
         .context("encoding public key PEM")?;
 
-    let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (username, display_name) VALUES ($1, $1) RETURNING id",
+    let user_id: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO users (username, display_name) VALUES ($1, $1) \
+         ON CONFLICT (username) DO NOTHING RETURNING id",
     )
     .bind(username)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await
     .context("creating user row")?;
 
-    sqlx::query(
-        "INSERT INTO user_keys (user_id, private_key_pem, public_key_pem) VALUES ($1, $2, $3)",
-    )
-    .bind(user_id)
-    .bind(&private_pem)
-    .bind(&public_pem)
-    .execute(db)
-    .await
-    .context("storing user keypair")?;
+    if let Some(user_id) = user_id {
+        // We won the race — store the keypair.
+        sqlx::query(
+            "INSERT INTO user_keys (user_id, private_key_pem, public_key_pem) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(&private_pem)
+        .bind(&public_pem)
+        .execute(db)
+        .await
+        .context("storing user keypair")?;
+    }
 
-    let public_key = Arc::new(
-        RsaPublicKey::from_public_key_pem(&public_pem).context("re-parsing public key")?,
-    );
-
-    Ok(UserKey {
-        user_id,
-        username: username.to_string(),
-        private_key: Arc::new(private_key),
-        public_key,
-        public_key_pem: public_pem,
-    })
+    // Whether we created the user or another instance did, load the key.
+    load_user_key_by_username(db, username)
+        .await?
+        .context("post-bootstrap key lookup failed")
 }
 
 async fn load_user_key_by_username(db: &PgPool, username: &str) -> Result<Option<UserKey>> {
@@ -187,12 +185,10 @@ async fn load_user_key_by_username(db: &PgPool, username: &str) -> Result<Option
         return Ok(None);
     };
 
-    let private_key = Arc::new(
-        RsaPrivateKey::from_pkcs8_pem(&private_pem).context("parsing private key PEM")?,
-    );
-    let public_key = Arc::new(
-        RsaPublicKey::from_public_key_pem(&public_pem).context("parsing public key PEM")?,
-    );
+    let private_key =
+        Arc::new(RsaPrivateKey::from_pkcs8_pem(&private_pem).context("parsing private key PEM")?);
+    let public_key =
+        Arc::new(RsaPublicKey::from_public_key_pem(&public_pem).context("parsing public key PEM")?);
 
     Ok(Some(UserKey {
         user_id,

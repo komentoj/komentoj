@@ -88,10 +88,7 @@ pub fn build_router(state: AppState) -> Router {
             post(sync_posts_for_user),
         )
         // ── Admin API (global admin token only) ─────────────────────────────
-        .route(
-            "/api/v1/admin/users",
-            post(create_user).get(list_users),
-        )
+        .route("/api/v1/admin/users", post(create_user).get(list_users))
         .route(
             "/api/v1/admin/users/{username}",
             axum::routing::delete(delete_user),
